@@ -1,0 +1,32 @@
+
+.env
+.env.*
+!.env.example
+
+# ========================
+# Hardhat build
+# ========================
+artifacts/
+cache/
+typechain/
+typechain-types/
+coverage/
+
+# ========================
+# Node
+# ========================
+node_modules/
+dist/
+build/
+
+# ========================
+# logs
+# ========================
+*.log
+
+# ========================
+# OS / IDE
+# ========================
+.DS_Store
+.vscode/
+.idea/
