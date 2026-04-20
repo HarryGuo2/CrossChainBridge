@@ -64,6 +64,7 @@ Edit `.env` with your actual values:
 # Ethereum Configuration
 ETH_RPC_URL=https://eth-sepolia.g.alchemy.com/v2/YOUR_ALCHEMY_KEY
 ETH_BRIDGE_ADDRESS=0x1234567890123456789012345678901234567890
+ETH_RELAYER_PRIVATE_KEY=0xYOUR_ETH_RELAYER_PRIVATE_KEY
 ETH_CONFIRMATIONS=3
 ETH_START_BLOCK=5000000
 
@@ -154,6 +155,7 @@ Check that:
 |----------|-------------|---------|
 | `ETH_RPC_URL` | Ethereum Sepolia RPC endpoint | `https://eth-sepolia.g.alchemy.com/v2/...` |
 | `ETH_BRIDGE_ADDRESS` | Deployed bridge contract address | `0x1234...` |
+| `ETH_RELAYER_PRIVATE_KEY` | Relayer EOA private key used to call `markRelayed` | `0xabc...` |
 | `ETH_START_BLOCK` | Block to start scanning from | `5000000` |
 | `SOL_RPC_URL` | Solana RPC endpoint | `https://api.devnet.solana.com` |
 | `SOL_PROGRAM_ID` | Anchor program ID | `YourProgram111...` |

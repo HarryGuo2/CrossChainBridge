@@ -2,7 +2,7 @@ export interface BridgeMessage {
   id: string;                // sha256 hash of nonce + sourceTxHash
   nonce: string;             // bigint serialized as string
   sender: string;
-  recipient: string;         // base58 Solana pubkey
+  recipient: string;         // base58 Solana pubkey (normalized from bytes32 event field)
   token: string;
   amount: string;            // bigint serialized as string
   sourceChain: string;
@@ -17,6 +17,7 @@ export interface BridgeMessage {
 export interface Config {
   ETH_RPC_URL: string;
   ETH_BRIDGE_ADDRESS: string;
+  ETH_RELAYER_PRIVATE_KEY: string;
   ETH_CONFIRMATIONS: number;
   ETH_START_BLOCK: number;
   SOL_RPC_URL: string;

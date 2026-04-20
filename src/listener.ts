@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
+import { PublicKey } from '@solana/web3.js';
 import { Config, BridgeMessage } from './types';
 import { RelayerDB } from './db';
 
@@ -317,7 +318,7 @@ export class EthListener extends EventEmitter {
       id,
       nonce,
       sender: args.sender,
-      recipient: args.recipient,
+      recipient: this.decodeRecipient(args.recipient),
       token: args.token,
       amount: args.amount.toString(),
       sourceChain: args.sourceChain,
@@ -328,6 +329,15 @@ export class EthListener extends EventEmitter {
       createdAt: now,
       updatedAt: now
     };
+  }
+
+  private decodeRecipient(recipientBytes32: string): string {
+    const bytes = ethers.getBytes(recipientBytes32);
+    if (bytes.length !== 32) {
+      throw new Error(`Invalid bytes32 recipient length: ${bytes.length}`);
+    }
+
+    return new PublicKey(bytes).toBase58();
   }
 
   private sleep(ms: number): Promise<void> {
