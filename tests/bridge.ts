@@ -163,4 +163,35 @@ describe("bridge", () => {
       }
     });
   });
+
+  describe("set_relayer", () => {
+    it("admin can rotate the authorized relayer", async () => {
+      const newRelayer = Keypair.generate();
+      await program.methods.setRelayer(newRelayer.publicKey)
+        .accounts({ admin: admin.publicKey, config: configPda })
+        .rpc();
+      const cfg = await program.account.bridgeConfig.fetch(configPda);
+      expect(cfg.authorizedRelayer.toBase58()).to.equal(newRelayer.publicKey.toBase58());
+
+      // Restore original relayer for downstream mint_wrapped tests.
+      await program.methods.setRelayer(relayer.publicKey)
+        .accounts({ admin: admin.publicKey, config: configPda })
+        .rpc();
+    });
+
+    it("non-admin cannot rotate", async () => {
+      const intruder = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(intruder.publicKey, LAMPORTS_PER_SOL);
+      await provider.connection.confirmTransaction(sig);
+      try {
+        await program.methods.setRelayer(intruder.publicKey)
+          .accounts({ admin: intruder.publicKey, config: configPda })
+          .signers([intruder])
+          .rpc();
+        expect.fail("expected setRelayer to throw");
+      } catch (err: any) {
+        expect(err.toString()).to.match(/UnauthorizedAdmin/);
+      }
+    });
+  });
 });
