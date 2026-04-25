@@ -55,6 +55,19 @@ pub struct MintWrapped<'info> {
 pub fn handler(ctx: Context<MintWrapped>, payload: BridgePayload) -> Result<()> {
     let cfg = &ctx.accounts.config;
 
+    // Pause + auth.
+    require!(!cfg.paused, BridgeError::Paused);
+    require!(ctx.accounts.relayer.key() == cfg.authorized_relayer, BridgeError::UnauthorizedRelayer);
+
+    // Payload version + source-binding.
+    require!(payload.version == 1, BridgeError::UnsupportedVersion);
+    require!(payload.source_chain_id == cfg.source_chain_id, BridgeError::InvalidSource);
+    require!(payload.source_bridge == cfg.source_bridge, BridgeError::InvalidSource);
+    require!(payload.source_token == cfg.source_token, BridgeError::InvalidSource);
+
+    // Mint identity.
+    require!(ctx.accounts.wrapped_mint.key() == cfg.wrapped_mint, BridgeError::WrongMint);
+
     require!(payload.amount > 0, BridgeError::ZeroAmount);
 
     let recipient_pubkey = Pubkey::new_from_array(payload.recipient_sol);
