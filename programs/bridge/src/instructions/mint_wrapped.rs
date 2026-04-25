@@ -65,16 +65,17 @@ pub fn handler(ctx: Context<MintWrapped>, payload: BridgePayload) -> Result<()> 
     require!(payload.source_bridge == cfg.source_bridge, BridgeError::InvalidSource);
     require!(payload.source_token == cfg.source_token, BridgeError::InvalidSource);
 
+    // Sanity.
+    require!(payload.amount > 0, BridgeError::ZeroAmount);
+
     // Mint identity.
     require!(ctx.accounts.wrapped_mint.key() == cfg.wrapped_mint, BridgeError::WrongMint);
 
-    require!(payload.amount > 0, BridgeError::ZeroAmount);
-
+    // Recipient consistency: ATA derivation first (using payload), then recipient match.
     let recipient_pubkey = Pubkey::new_from_array(payload.recipient_sol);
-    require!(ctx.accounts.recipient.key() == recipient_pubkey, BridgeError::RecipientMismatch);
-
     let expected_ata = get_associated_token_address(&recipient_pubkey, &ctx.accounts.wrapped_mint.key());
     require!(ctx.accounts.recipient_token_account.key() == expected_ata, BridgeError::InvalidRecipientAta);
+    require!(ctx.accounts.recipient.key() == recipient_pubkey, BridgeError::RecipientMismatch);
 
     let bump = cfg.mint_authority_bump;
     let signer_seeds: &[&[&[u8]]] = &[&[BridgeConfig::MINT_AUTHORITY_SEED, &[bump]]];
