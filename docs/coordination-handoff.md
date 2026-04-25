@@ -36,6 +36,8 @@ const bridgePayload = {
 };
 ```
 
+**Note on `msg.logIndex`:** `BridgeMessage` in `src/types.ts` does not currently have a `logIndex` field. The relayer team must add `logIndex?: number` to the `BridgeMessage` interface and populate it from the Ethereum event log inside `src/listener.ts` (use `log.index` from the `ethers` `Log` object when processing each matched event). Without this, `sourceLogIndex` will always be 0, which is acceptable for correctness but loses provenance information.
+
 The `mintWrapped` call now also needs:
 - `config` (PDA `["config"]`)
 - `mintAuthority` (PDA `["mint_authority"]`)
@@ -65,6 +67,35 @@ await program.methods.mintWrapped(payload)
   .accounts({ /* see new accounts list above */ })
   .preInstructions([createAtaIx])
   .rpc();
+```
+
+## Required additions to `Config` interface and `loadConfig()` in the relayer
+
+The four env vars listed below are referenced in `src/submitter.ts` but are **not yet present** in `src/types.ts` (`Config` interface) or `src/config.ts` (`loadConfig()`). The relayer team must add them before the submitter will compile and work end-to-end:
+
+| Env var | Type | Notes |
+|---|---|---|
+| `ETH_TOKEN_ADDRESS` | `string` | The bound ERC-20 address from Yang's Sepolia deployment. Validated as a 42-char `0x…` hex string (same as `ETH_BRIDGE_ADDRESS`). |
+| `SOL_BRIDGE_CONFIG` | `string` (optional) | Base58 PDA address `["config"]`. The relayer can derive this from `SOL_PROGRAM_ID` if omitted. |
+| `SOL_MINT_AUTHORITY` | `string` (optional) | Base58 PDA address `["mint_authority"]`. Derivable from `SOL_PROGRAM_ID` if omitted. |
+| `SOL_AUTHORIZED_RELAYER` | `string` | The relayer keypair's public key; must match what was passed to `initialize`. Used to sanity-check the loaded keypair at startup. |
+
+Add these to the `Config` interface in `src/types.ts`:
+
+```typescript
+ETH_TOKEN_ADDRESS: string;
+SOL_BRIDGE_CONFIG?: string;
+SOL_MINT_AUTHORITY?: string;
+SOL_AUTHORIZED_RELAYER: string;
+```
+
+And wire them up in `loadConfig()` in `src/config.ts`:
+
+```typescript
+ETH_TOKEN_ADDRESS: getEnvVar('ETH_TOKEN_ADDRESS'),
+SOL_BRIDGE_CONFIG: process.env['SOL_BRIDGE_CONFIG'],        // optional
+SOL_MINT_AUTHORITY: process.env['SOL_MINT_AUTHORITY'],      // optional
+SOL_AUTHORIZED_RELAYER: getEnvVar('SOL_AUTHORIZED_RELAYER'),
 ```
 
 ## What `.env` keys the relayer must add
