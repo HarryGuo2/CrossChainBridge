@@ -30,6 +30,7 @@ describe("bridge", () => {
   let wrappedMint: PublicKey;
   let configPda: PublicKey;
   let mintAuthorityPda: PublicKey;
+  let recipient: Keypair;
 
   function makePayload(overrides: Partial<any> = {}) {
     return {
@@ -74,6 +75,8 @@ describe("bridge", () => {
       [Buffer.from("mint_authority")],
       program.programId
     );
+
+    recipient = Keypair.generate();
   });
 
   describe("initialize rejection cases", () => {
@@ -205,8 +208,57 @@ describe("bridge", () => {
         .rpc();
       const cfg = await program.account.bridgeConfig.fetch(configPda);
       expect(cfg.authorizedRelayer.toBase58()).to.equal(newRelayer.publicKey.toBase58());
+      // NOTE: intentionally does NOT restore here — the next test verifies
+      // that the old key is rejected and then restores the original relayer.
+    });
 
-      // Restore original relayer for downstream mint_wrapped tests.
+    it("after rotation, the old relayer key is rejected by mint_wrapped", async () => {
+      const newRelayer = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(newRelayer.publicKey, LAMPORTS_PER_SOL);
+      await provider.connection.confirmTransaction(sig);
+
+      // Rotate to the new key.
+      await program.methods.setRelayer(newRelayer.publicKey)
+        .accounts({ admin: admin.publicKey, config: configPda })
+        .rpc();
+
+      // Old key should now be rejected.
+      const oneOffRecipient = Keypair.generate();
+      const oneOffAta = await getAssociatedTokenAddress(wrappedMint, oneOffRecipient.publicKey);
+      const nonce = 109n;
+      const processedMessage = processedPda(
+        program.programId, SOURCE_CHAIN_ID, SOURCE_BRIDGE, nonce
+      );
+      const payload = makePayload({
+        nonce: new anchor.BN(nonce.toString()),
+        recipientSol: Array.from(oneOffRecipient.publicKey.toBuffer()),
+      });
+      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        relayer.publicKey, oneOffAta, oneOffRecipient.publicKey, wrappedMint
+      );
+
+      try {
+        await program.methods.mintWrapped(payload)
+          .accounts({
+            relayer: relayer.publicKey, // OLD key
+            config: configPda,
+            processedMessage,
+            wrappedMint,
+            mintAuthority: mintAuthorityPda,
+            recipient: oneOffRecipient.publicKey,
+            recipientTokenAccount: oneOffAta,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+          })
+          .preInstructions([createAtaIx])
+          .signers([relayer])
+          .rpc();
+        expect.fail("expected UnauthorizedRelayer for old key");
+      } catch (e: any) {
+        expect(e.toString()).to.match(/UnauthorizedRelayer/);
+      }
+
+      // Restore original relayer for downstream tests.
       await program.methods.setRelayer(relayer.publicKey)
         .accounts({ admin: admin.publicKey, config: configPda })
         .rpc();
@@ -275,7 +327,6 @@ describe("bridge", () => {
   });
 
   describe("mint_wrapped validation", () => {
-    const recipient = Keypair.generate();
 
     async function attempt(payload: any, signer = relayer, nonceForPda?: bigint, badAccounts: any = {}) {
       const nonce = nonceForPda ?? BigInt(payload.nonce.toString());
@@ -414,6 +465,47 @@ describe("bridge", () => {
         await attempt(payload, relayer, undefined, { wrappedMint: otherMint });
         expect.fail("expected WrongMint");
       } catch (e: any) { expect(e.toString()).to.match(/WrongMint/); }
+    });
+
+    it("rejects wrong recipient ATA", async () => {
+      // Build a payload pointing at `recipient`, but pass a DIFFERENT ATA in
+      // the accounts. The program's `InvalidRecipientAta` check should fire.
+      const otherWallet = Keypair.generate();
+      const wrongAta = await getAssociatedTokenAddress(wrappedMint, otherWallet.publicKey);
+      // Pre-create the WRONG ATA so the account validation gets past
+      // AccountNotInitialized and reaches our InvalidRecipientAta check.
+      const createWrongAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        relayer.publicKey, wrongAta, otherWallet.publicKey, wrappedMint
+      );
+      const nonce = 108n;
+      const processedMessage = processedPda(
+        program.programId, SOURCE_CHAIN_ID, SOURCE_BRIDGE, nonce
+      );
+      const payload = makePayload({
+        nonce: new anchor.BN(nonce.toString()),
+        recipientSol: Array.from(recipient.publicKey.toBuffer()),
+      });
+
+      try {
+        await program.methods.mintWrapped(payload)
+          .accounts({
+            relayer: relayer.publicKey,
+            config: configPda,
+            processedMessage,
+            wrappedMint,
+            mintAuthority: mintAuthorityPda,
+            recipient: recipient.publicKey,
+            recipientTokenAccount: wrongAta,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+          })
+          .preInstructions([createWrongAtaIx])
+          .signers([relayer])
+          .rpc();
+        expect.fail("expected InvalidRecipientAta");
+      } catch (e: any) {
+        expect(e.toString()).to.match(/InvalidRecipientAta/);
+      }
     });
   });
 
