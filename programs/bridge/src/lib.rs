@@ -3,6 +3,9 @@ use anchor_lang::prelude::*;
 pub mod errors;
 pub mod payload;
 pub mod state;
+pub mod instructions;
+
+use instructions::*;
 
 declare_id!("FaWcnbmoyN1SWfUaio4cJAC2HokPgukzKhhk1hZrh4De");
 
@@ -10,10 +13,7 @@ declare_id!("FaWcnbmoyN1SWfUaio4cJAC2HokPgukzKhhk1hZrh4De");
 pub mod bridge {
     use super::*;
 
-    pub fn ping(_ctx: Context<Ping>) -> Result<()> {
-        Ok(())
+    pub fn initialize(ctx: Context<Initialize>, args: InitializeArgs) -> Result<()> {
+        instructions::initialize::handler(ctx, args)
     }
 }
-
-#[derive(Accounts)]
-pub struct Ping {}

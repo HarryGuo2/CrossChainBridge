@@ -21,5 +21,10 @@ wallet = "~/.config/solana/id.json"
 [scripts]
 test = "npx ts-mocha -p ./tsconfig.test.json -t 1000000 tests/**/*.ts"
 
+[test]
+startup_wait = 10000
+
 [test.validator]
 url = "https://api.devnet.solana.com"
+bind_address = "127.0.0.1"
+rpc_port = 8899
