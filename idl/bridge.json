@@ -3,12 +3,97 @@
   "name": "bridge",
   "instructions": [
     {
+      "name": "initialize",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "wrappedMint",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "mintAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": "InitializeArgs"
+          }
+        }
+      ]
+    },
+    {
+      "name": "setPaused",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "setRelayer",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "newRelayer",
+          "type": "publicKey"
+        }
+      ]
+    },
+    {
       "name": "mintWrapped",
       "accounts": [
         {
           "name": "relayer",
           "isMut": true,
           "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
         },
         {
           "name": "processedMessage",
@@ -18,6 +103,11 @@
         {
           "name": "wrappedMint",
           "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mintAuthority",
+          "isMut": false,
           "isSigner": false
         },
         {
@@ -32,11 +122,6 @@
         },
         {
           "name": "tokenProgram",
-          "isMut": false,
-          "isSigner": false
-        },
-        {
-          "name": "associatedTokenProgram",
           "isMut": false,
           "isSigner": false
         },
@@ -56,43 +141,57 @@
       ]
     }
   ],
-  "types": [
+  "accounts": [
     {
-      "name": "BridgePayload",
+      "name": "BridgeConfig",
       "type": {
         "kind": "struct",
         "fields": [
           {
-            "name": "nonce",
-            "type": "u64"
+            "name": "admin",
+            "type": "publicKey"
           },
           {
-            "name": "sender",
-            "type": "string"
+            "name": "authorizedRelayer",
+            "type": "publicKey"
           },
           {
-            "name": "recipient",
-            "type": "string"
+            "name": "sourceChainId",
+            "type": "u16"
           },
           {
-            "name": "token",
-            "type": "string"
+            "name": "sourceBridge",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
           },
           {
-            "name": "amount",
-            "type": "u64"
+            "name": "sourceToken",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
           },
           {
-            "name": "sourceChain",
-            "type": "string"
+            "name": "wrappedMint",
+            "type": "publicKey"
           },
           {
-            "name": "targetChain",
-            "type": "string"
+            "name": "mintAuthorityBump",
+            "type": "u8"
           },
           {
-            "name": "sourceTxHash",
-            "type": "string"
+            "name": "configBump",
+            "type": "u8"
+          },
+          {
+            "name": "paused",
+            "type": "bool"
           }
         ]
       }
@@ -107,12 +206,142 @@
             "type": "u64"
           },
           {
-            "name": "processed",
-            "type": "bool"
+            "name": "sourceTxHash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
           },
           {
-            "name": "timestamp",
-            "type": "i64"
+            "name": "sourceLogIndex",
+            "type": "u32"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "recipient",
+            "type": "publicKey"
+          },
+          {
+            "name": "processedSlot",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "InitializeArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authorizedRelayer",
+            "type": "publicKey"
+          },
+          {
+            "name": "sourceChainId",
+            "type": "u16"
+          },
+          {
+            "name": "sourceBridge",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
+          },
+          {
+            "name": "sourceToken",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "BridgePayload",
+      "docs": [
+        "Fixed-width 147-byte canonical bridge message payload.",
+        "Field order and encoding must stay byte-compatible with the relayer's encoder."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "sourceChainId",
+            "type": "u16"
+          },
+          {
+            "name": "sourceBridge",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
+          },
+          {
+            "name": "sourceToken",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "senderEth",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
+          },
+          {
+            "name": "recipientSol",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "sourceTxHash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "sourceLogIndex",
+            "type": "u32"
           }
         ]
       }
@@ -121,18 +350,53 @@
   "errors": [
     {
       "code": 6000,
-      "name": "MessageAlreadyProcessed",
-      "msg": "Message has already been processed"
+      "name": "Paused",
+      "msg": "Bridge is paused"
     },
     {
       "code": 6001,
-      "name": "InvalidTargetChain",
-      "msg": "Invalid target chain"
+      "name": "UnauthorizedRelayer",
+      "msg": "Signer is not the authorized relayer"
     },
     {
       "code": 6002,
-      "name": "UnauthorizedRelayer",
-      "msg": "Unauthorized relayer"
+      "name": "UnauthorizedAdmin",
+      "msg": "Signer is not the admin"
+    },
+    {
+      "code": 6003,
+      "name": "UnsupportedVersion",
+      "msg": "Unsupported payload version"
+    },
+    {
+      "code": 6004,
+      "name": "InvalidSource",
+      "msg": "Source domain mismatch"
+    },
+    {
+      "code": 6005,
+      "name": "ZeroAmount",
+      "msg": "Amount must be non-zero"
+    },
+    {
+      "code": 6006,
+      "name": "WrongMint",
+      "msg": "Wrapped mint does not match configured mint"
+    },
+    {
+      "code": 6007,
+      "name": "InvalidRecipientAta",
+      "msg": "Recipient ATA does not match"
+    },
+    {
+      "code": 6008,
+      "name": "RecipientMismatch",
+      "msg": "Recipient pubkey does not match payload"
+    },
+    {
+      "code": 6009,
+      "name": "MintAuthorityNotTransferred",
+      "msg": "Mint authority not transferred to bridge PDA"
     }
   ]
 }
