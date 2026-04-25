@@ -416,4 +416,60 @@ describe("bridge", () => {
       } catch (e: any) { expect(e.toString()).to.match(/WrongMint/); }
     });
   });
+
+  describe("mint_wrapped replay protection", () => {
+    const recipient = Keypair.generate();
+    const nonce = 200n;
+
+    it("rejects duplicate submission for the same nonce", async () => {
+      const recipientAta = await getAssociatedTokenAddress(wrappedMint, recipient.publicKey);
+      const processedMessage = processedPda(program.programId, SOURCE_CHAIN_ID, SOURCE_BRIDGE, nonce);
+      const payload = makePayload({
+        nonce: new anchor.BN(nonce.toString()),
+        recipientSol: Array.from(recipient.publicKey.toBuffer()),
+      });
+      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        relayer.publicKey, recipientAta, recipient.publicKey, wrappedMint
+      );
+
+      // First submission succeeds.
+      await program.methods.mintWrapped(payload)
+        .accounts({
+          relayer: relayer.publicKey,
+          config: configPda,
+          processedMessage,
+          wrappedMint,
+          mintAuthority: mintAuthorityPda,
+          recipient: recipient.publicKey,
+          recipientTokenAccount: recipientAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .preInstructions([createAtaIx])
+        .signers([relayer])
+        .rpc();
+
+      // Second submission with the SAME nonce must fail at PDA init.
+      try {
+        await program.methods.mintWrapped(payload)
+          .accounts({
+            relayer: relayer.publicKey,
+            config: configPda,
+            processedMessage,
+            wrappedMint,
+            mintAuthority: mintAuthorityPda,
+            recipient: recipient.publicKey,
+            recipientTokenAccount: recipientAta,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([relayer])
+          .rpc();
+        expect.fail("expected duplicate to fail");
+      } catch (e: any) {
+        // Anchor returns "already in use" or transaction simulation failure when init hits an existing account.
+        expect(e.toString()).to.match(/already in use|0x0|allocate|simulation failed/i);
+      }
+    });
+  });
 });
