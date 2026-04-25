@@ -16,4 +16,8 @@ pub mod bridge {
     pub fn initialize(ctx: Context<Initialize>, args: InitializeArgs) -> Result<()> {
         instructions::initialize::handler(ctx, args)
     }
+
+    pub fn set_paused(ctx: Context<SetPaused>, paused: bool) -> Result<()> {
+        instructions::set_paused::handler(ctx, paused)
+    }
 }

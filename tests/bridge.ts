@@ -131,4 +131,36 @@ describe("bridge", () => {
       expect(cfg.paused).to.equal(false);
     });
   });
+
+  describe("set_paused", () => {
+    it("admin can pause and unpause", async () => {
+      await program.methods.setPaused(true)
+        .accounts({ admin: admin.publicKey, config: configPda })
+        .rpc();
+      let cfg = await program.account.bridgeConfig.fetch(configPda);
+      expect(cfg.paused).to.equal(true);
+
+      await program.methods.setPaused(false)
+        .accounts({ admin: admin.publicKey, config: configPda })
+        .rpc();
+      cfg = await program.account.bridgeConfig.fetch(configPda);
+      expect(cfg.paused).to.equal(false);
+    });
+
+    it("non-admin cannot pause", async () => {
+      const intruder = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(intruder.publicKey, LAMPORTS_PER_SOL);
+      await provider.connection.confirmTransaction(sig);
+
+      try {
+        await program.methods.setPaused(true)
+          .accounts({ admin: intruder.publicKey, config: configPda })
+          .signers([intruder])
+          .rpc();
+        expect.fail("expected setPaused to throw");
+      } catch (err: any) {
+        expect(err.toString()).to.match(/UnauthorizedAdmin/);
+      }
+    });
+  });
 });
