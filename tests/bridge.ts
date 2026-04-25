@@ -6,7 +6,12 @@ import {
   setAuthority,
   AuthorityType,
   TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountIdempotentInstruction,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  getAccount,
 } from "@solana/spl-token";
+import { TransactionInstruction, Transaction } from "@solana/web3.js";
 import { expect } from "chai";
 import { Bridge } from "../target/types/bridge";
 
@@ -25,6 +30,34 @@ describe("bridge", () => {
   let wrappedMint: PublicKey;
   let configPda: PublicKey;
   let mintAuthorityPda: PublicKey;
+
+  function makePayload(overrides: Partial<any> = {}) {
+    return {
+      version: 1,
+      sourceChainId: SOURCE_CHAIN_ID,
+      sourceBridge: Array.from(SOURCE_BRIDGE),
+      sourceToken: Array.from(SOURCE_TOKEN),
+      nonce: new anchor.BN(1),
+      amount: new anchor.BN(1_000_000),
+      senderEth: Array.from(Buffer.alloc(20, 0xee)),
+      recipientSol: Array.from(Buffer.alloc(32, 0)),
+      sourceTxHash: Array.from(Buffer.alloc(32, 0xaa)),
+      sourceLogIndex: 0,
+      ...overrides,
+    };
+  }
+
+  function processedPda(programId: PublicKey, sourceChainId: number, sourceBridge: Buffer, nonce: bigint) {
+    const chainBuf = Buffer.alloc(2);
+    chainBuf.writeUInt16LE(sourceChainId, 0);
+    const nonceBuf = Buffer.alloc(8);
+    nonceBuf.writeBigUInt64LE(nonce, 0);
+    const [pda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("processed"), chainBuf, sourceBridge, nonceBuf],
+      programId
+    );
+    return pda;
+  }
 
   before(async () => {
     const sig = await provider.connection.requestAirdrop(
@@ -192,6 +225,52 @@ describe("bridge", () => {
       } catch (err: any) {
         expect(err.toString()).to.match(/UnauthorizedAdmin/);
       }
+    });
+  });
+
+  describe("mint_wrapped happy path", () => {
+    const recipient = Keypair.generate();
+
+    it("mints wrapped tokens to the recipient ATA", async () => {
+      const recipientAta = await getAssociatedTokenAddress(wrappedMint, recipient.publicKey);
+      const nonce = 1n;
+      const payload = makePayload({
+        nonce: new anchor.BN(nonce.toString()),
+        recipientSol: Array.from(recipient.publicKey.toBuffer()),
+      });
+      const processedMessage = processedPda(program.programId, SOURCE_CHAIN_ID, SOURCE_BRIDGE, nonce);
+
+      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        relayer.publicKey,
+        recipientAta,
+        recipient.publicKey,
+        wrappedMint
+      );
+
+      await program.methods
+        .mintWrapped(payload)
+        .accounts({
+          relayer: relayer.publicKey,
+          config: configPda,
+          processedMessage,
+          wrappedMint,
+          mintAuthority: mintAuthorityPda,
+          recipient: recipient.publicKey,
+          recipientTokenAccount: recipientAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .preInstructions([createAtaIx])
+        .signers([relayer])
+        .rpc();
+
+      const ata = await getAccount(provider.connection, recipientAta);
+      expect(ata.amount.toString()).to.equal("1000000");
+
+      const pm = await program.account.processedMessage.fetch(processedMessage);
+      expect(pm.nonce.toString()).to.equal("1");
+      expect(pm.amount.toString()).to.equal("1000000");
+      expect(pm.recipient.toBase58()).to.equal(recipient.publicKey.toBase58());
     });
   });
 });
