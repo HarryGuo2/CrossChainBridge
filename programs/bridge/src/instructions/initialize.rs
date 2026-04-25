@@ -38,6 +38,15 @@ pub struct Initialize<'info> {
 }
 
 pub fn handler(ctx: Context<Initialize>, args: InitializeArgs) -> Result<()> {
+    // Verify the wrapped mint's authority is already set to the bridge's PDA.
+    let expected_authority = ctx.accounts.mint_authority.key();
+    let actual_authority = ctx.accounts.wrapped_mint.mint_authority;
+    require!(
+        actual_authority
+            == anchor_lang::solana_program::program_option::COption::Some(expected_authority),
+        crate::errors::BridgeError::MintAuthorityNotTransferred
+    );
+
     let config = &mut ctx.accounts.config;
     config.admin = ctx.accounts.admin.key();
     config.authorized_relayer = args.authorized_relayer;

@@ -1,11 +1,6 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import {
-  PublicKey,
-  Keypair,
-  SystemProgram,
-  LAMPORTS_PER_SOL,
-} from "@solana/web3.js";
+import { PublicKey, Keypair, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import {
   createMint,
   setAuthority,
@@ -46,48 +41,94 @@ describe("bridge", () => {
       [Buffer.from("mint_authority")],
       program.programId
     );
-
-    wrappedMint = await createMint(
-      provider.connection,
-      admin,
-      admin.publicKey,
-      null,
-      6
-    );
-    await setAuthority(
-      provider.connection,
-      admin,
-      wrappedMint,
-      admin,
-      AuthorityType.MintTokens,
-      mintAuthorityPda
-    );
   });
 
-  it("initializes the bridge config", async () => {
-    await program.methods
-      .initialize({
-        authorizedRelayer: relayer.publicKey,
-        sourceChainId: SOURCE_CHAIN_ID,
-        sourceBridge: Array.from(SOURCE_BRIDGE),
-        sourceToken: Array.from(SOURCE_TOKEN),
-      })
-      .accounts({
-        admin: admin.publicKey,
-        config: configPda,
-        wrappedMint: wrappedMint,
-        mintAuthority: mintAuthorityPda,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
+  describe("initialize rejection cases", () => {
+    let badMint: PublicKey;
 
-    const cfg = await program.account.bridgeConfig.fetch(configPda);
-    expect(cfg.admin.toBase58()).to.equal(admin.publicKey.toBase58());
-    expect(cfg.authorizedRelayer.toBase58()).to.equal(relayer.publicKey.toBase58());
-    expect(cfg.sourceChainId).to.equal(SOURCE_CHAIN_ID);
-    expect(Buffer.from(cfg.sourceBridge).equals(SOURCE_BRIDGE)).to.equal(true);
-    expect(Buffer.from(cfg.sourceToken).equals(SOURCE_TOKEN)).to.equal(true);
-    expect(cfg.wrappedMint.toBase58()).to.equal(wrappedMint.toBase58());
-    expect(cfg.paused).to.equal(false);
+    before(async () => {
+      // Mint whose authority is admin, NOT transferred to the program PDA.
+      badMint = await createMint(
+        provider.connection,
+        admin,
+        admin.publicKey,
+        null,
+        6
+      );
+    });
+
+    it("rejects when mint authority is not the program PDA", async () => {
+      try {
+        await program.methods
+          .initialize({
+            authorizedRelayer: relayer.publicKey,
+            sourceChainId: SOURCE_CHAIN_ID,
+            sourceBridge: Array.from(SOURCE_BRIDGE),
+            sourceToken: Array.from(SOURCE_TOKEN),
+          })
+          .accounts({
+            admin: admin.publicKey,
+            config: configPda,
+            wrappedMint: badMint,
+            mintAuthority: mintAuthorityPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+        expect.fail("expected initialize to throw");
+      } catch (err: any) {
+        expect(err.toString()).to.match(/MintAuthorityNotTransferred/);
+      }
+    });
+  });
+
+  describe("initialize happy path", () => {
+    before(async () => {
+      wrappedMint = await createMint(
+        provider.connection,
+        admin,
+        admin.publicKey,
+        null,
+        6
+      );
+      await setAuthority(
+        provider.connection,
+        admin,
+        wrappedMint,
+        admin,
+        AuthorityType.MintTokens,
+        mintAuthorityPda
+      );
+    });
+
+    it("initializes the bridge config", async () => {
+      await program.methods
+        .initialize({
+          authorizedRelayer: relayer.publicKey,
+          sourceChainId: SOURCE_CHAIN_ID,
+          sourceBridge: Array.from(SOURCE_BRIDGE),
+          sourceToken: Array.from(SOURCE_TOKEN),
+        })
+        .accounts({
+          admin: admin.publicKey,
+          config: configPda,
+          wrappedMint: wrappedMint,
+          mintAuthority: mintAuthorityPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const cfg = await program.account.bridgeConfig.fetch(configPda);
+      expect(cfg.admin.toBase58()).to.equal(admin.publicKey.toBase58());
+      expect(cfg.authorizedRelayer.toBase58()).to.equal(
+        relayer.publicKey.toBase58()
+      );
+      expect(cfg.sourceChainId).to.equal(SOURCE_CHAIN_ID);
+      expect(Buffer.from(cfg.sourceBridge).equals(SOURCE_BRIDGE)).to.equal(
+        true
+      );
+      expect(Buffer.from(cfg.sourceToken).equals(SOURCE_TOKEN)).to.equal(true);
+      expect(cfg.wrappedMint.toBase58()).to.equal(wrappedMint.toBase58());
+      expect(cfg.paused).to.equal(false);
+    });
   });
 });
