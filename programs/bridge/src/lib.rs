@@ -1,0 +1,15 @@
+use anchor_lang::prelude::*;
+
+declare_id!("FaWcnbmoyN1SWfUaio4cJAC2HokPgukzKhhk1hZrh4De");
+
+#[program]
+pub mod bridge {
+    use super::*;
+
+    pub fn ping(_ctx: Context<Ping>) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Ping {}

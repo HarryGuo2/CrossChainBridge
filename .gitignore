@@ -1,0 +1,14 @@
+dist/
+*.log
+
+# Anchor / Solana
+target/
+.anchor/
+*.so
+test-ledger/
+node_modules/
+
+# But keep the program keypair so deploys are reproducible
+!target/deploy/
+target/deploy/*
+!target/deploy/bridge-keypair.json
