@@ -16,6 +16,6 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true
   },
-  "include": ["src/**/*", "idl/**/*", "tests/**/*", "migrations/**/*"],
+  "include": ["src/**/*", "idl/**/*"],
   "exclude": ["node_modules", "dist", "**/*.test.ts"]
 }
