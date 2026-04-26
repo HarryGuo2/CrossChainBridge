@@ -109,32 +109,29 @@ SOL_AUTHORIZED_RELAYER=...     # the relayer pubkey we initialized BridgeConfig 
 
 ## Devnet deployment artifacts
 
-**Status as of 2026-04-25: Devnet deployment pending.** The Anchor program is built and the IDL is regenerated. Local `anchor test` passes (16/16). The Devnet `anchor deploy` step was not run because the deployer keypair `DXMeqSthTy7Cf2E4mpSheTduDDKq9saddTPsnkVs4ziT` had no Devnet SOL and the CLI airdrop endpoint was rate-limited.
-
-To complete Devnet deployment:
-
-1. Fund `DXMeqSthTy7Cf2E4mpSheTduDDKq9saddTPsnkVs4ziT` with ≥3 SOL on Devnet (use https://faucet.solana.com/).
-2. Run from repo root:
-   ```bash
-   export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-   solana config set --url devnet
-   anchor deploy --provider.cluster devnet
-   RELAYER_PUBKEY=<from Leah & Harry, or DXMeq... if reusing the deployer> \
-     ETH_BRIDGE_ADDRESS=<from Yang> \
-     ETH_TOKEN_ADDRESS=<from Yang> \
-     ANCHOR_PROVIDER_URL=https://api.devnet.solana.com \
-     ANCHOR_WALLET=~/.config/solana/id.json \
-     npm run anchor:initialize
-   solana config set --url localhost
-   ```
-3. Capture the `=== DEPLOYMENT ARTIFACTS ===` block printed at the end and fill in the table below.
+**Status as of 2026-04-26: Deployed to Devnet.** Program deployed with signature `5mhZbZiWSuunNUDQcdQo9pmNFRUfb2wb2kyPzEJ1eFSa33BPbCpTy6A9dtPSu9Kj3evGfCyJDXzPhN5s8GYnMjaT`. BridgeConfig initialized with placeholder source addresses (`0x0000…`) — these will need to be reset once Yang's `EthBridge.sol` and `TestToken.sol` Sepolia addresses are available (BridgeConfig has no setter for source bindings; redeploy via `solana program close <PROGRAM_ID>` + fresh `anchor deploy` + re-`initialize` is the workaround).
 
 ```
-SOL_PROGRAM_ID=FaWcnbmoyN1SWfUaio4cJAC2HokPgukzKhhk1hZrh4De   # baked into the binary, fixed
-SOL_WRAPPED_MINT=<TBD after Devnet deploy>
-SOL_BRIDGE_CONFIG=<TBD after Devnet deploy>
-SOL_MINT_AUTHORITY=<TBD after Devnet deploy>
-SOL_AUTHORIZED_RELAYER=<TBD after Devnet deploy>
+SOL_PROGRAM_ID=FaWcnbmoyN1SWfUaio4cJAC2HokPgukzKhhk1hZrh4De
+SOL_WRAPPED_MINT=GbYLimSgAdNio4DpVo3Ha8nren1sss6466Sbec2GKxjp
+SOL_BRIDGE_CONFIG=5hej1qy8eTZKtQTKQvYFmiMs79HGxiD3ncaSko4fiYpB
+SOL_MINT_AUTHORITY=J3WfJCAnB3ynPmHb9eaHrUdER4F79NZSZLc9WjBToq54
+SOL_AUTHORIZED_RELAYER=DXMeqSthTy7Cf2E4mpSheTduDDKq9saddTPsnkVs4ziT
+```
+
+The `SOL_AUTHORIZED_RELAYER` is currently the same key as the deployer (single-key Devnet convenience). When Leah & Harry are ready with their dedicated relayer keypair, run:
+
+```bash
+solana config set --url devnet
+# Use the deployer (admin) keypair to rotate the relayer:
+anchor run rotate-relayer  # OR call set_relayer manually via TS, no script wrapper exists yet
+```
+
+Or the manual TS one-liner:
+```typescript
+await program.methods.setRelayer(new PublicKey('<NEW_RELAYER_PUBKEY>'))
+  .accounts({ admin: admin.publicKey, config: configPda })
+  .rpc();
 ```
 
 ## What Yang needs to share
