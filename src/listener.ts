@@ -132,7 +132,7 @@ export class EthListener extends EventEmitter {
 
       const toBlock = Math.min(
         currentBlock - this.config.ETH_CONFIRMATIONS,
-        fromBlock + 999 // Limit to prevent RPC timeouts
+        fromBlock + 9 // Limit to 10 blocks for Alchemy Free Tier
       );
 
       if (toBlock < fromBlock) {

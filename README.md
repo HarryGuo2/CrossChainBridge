@@ -17,8 +17,8 @@ A production-quality TypeScript relayer service for bridging tokens between Ethe
 
 ## Features
 
-- **Reliable Event Monitoring**: Polls Ethereum for `Locked` events with configurable confirmations
-- **SQLite Persistence**: Stores all bridge messages with status tracking and retry logic
+- **Reliable Event Monitoring**: Polls Ethereum for `Locked` events with configurable confirmations. Optimised for Alchemy Free Tier with a 10-block scan range to avoid RPC limits.
+- **SQLite Persistence**: Stores all bridge messages with status tracking and retry logic.
 - **Automatic Retries**: Failed transactions are retried up to 5 times with exponential backoff
 - **Graceful Shutdown**: Handles SIGINT/SIGTERM signals for clean shutdown
 - **Production Logging**: Structured JSON logs for all events and errors
