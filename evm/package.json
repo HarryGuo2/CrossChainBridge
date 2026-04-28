@@ -1,0 +1,19 @@
+{
+  "name": "evm-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "hardhat build",
+    "test": "hardhat test",
+    "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-mocha-ethers": "^3.0.0",
+    "@openzeppelin/contracts": "^5.0.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.0.0",
+    "hardhat": "^3.0.0",
+    "typescript": "^5.0.0"
+  }
+}

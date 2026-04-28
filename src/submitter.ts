@@ -2,8 +2,6 @@ import {
   Connection,
   Keypair,
   PublicKey,
-  Transaction,
-  sendAndConfirmTransaction,
   SystemProgram,
   LAMPORTS_PER_SOL
 } from '@solana/web3.js';
@@ -11,14 +9,14 @@ import {
   Program,
   AnchorProvider,
   Wallet,
-  BN,
-  utils
+  BN
 } from '@coral-xyz/anchor';
 import {
   getAssociatedTokenAddress,
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID
 } from '@solana/spl-token';
+import { ethers } from 'ethers';
 import * as fs from 'fs';
 import { Config, BridgeMessage } from './types';
 import { RelayerDB } from './db';
@@ -36,13 +34,16 @@ export class SolanaSubmitter {
   private connection: Connection;
   private relayerKeypair: Keypair;
   private program: Program;
-  private config: Config;
   private db: RelayerDB;
   private programId: PublicKey;
   private wrappedMint: PublicKey;
+  private ethBridge: ethers.Contract;
+
+  private static readonly ETH_BRIDGE_ABI = [
+    'function markRelayed(uint64 nonce, bytes32 solanaTxHash) external'
+  ];
 
   constructor(config: Config, db: RelayerDB) {
-    this.config = config;
     this.db = db;
 
     this.connection = new Connection(config.SOL_RPC_URL, 'confirmed');
@@ -62,6 +63,14 @@ export class SolanaSubmitter {
     );
 
     this.program = new Program(idl as any, this.programId, provider);
+
+    const ethProvider = new ethers.JsonRpcProvider(config.ETH_RPC_URL);
+    const ethSigner = new ethers.Wallet(config.ETH_RELAYER_PRIVATE_KEY, ethProvider);
+    this.ethBridge = new ethers.Contract(
+      config.ETH_BRIDGE_ADDRESS,
+      SolanaSubmitter.ETH_BRIDGE_ABI,
+      ethSigner
+    );
 
     log({
       event: 'solana_submitter_initialized',
@@ -186,6 +195,8 @@ export class SolanaSubmitter {
         amount: msg.amount
       });
 
+      await this.markRelayedOnEthereum(msg.nonce, signature);
+
     } catch (error: any) {
       // Update status to failed and increment retry count
       this.db.updateStatus(msg.id, 'failed', msg.retryCount + 1);
@@ -288,6 +299,31 @@ export class SolanaSubmitter {
         error: error.message
       });
       return 0;
+    }
+  }
+
+  private async markRelayedOnEthereum(nonce: string, solanaSignature: string): Promise<void> {
+    try {
+      const solanaTxHash = ethers.keccak256(ethers.toUtf8Bytes(solanaSignature));
+      const tx = await this.ethBridge.markRelayed(BigInt(nonce), solanaTxHash);
+      const receipt = await tx.wait();
+
+      log({
+        event: 'ethereum_mark_relayed_success',
+        nonce,
+        eth_tx_hash: tx.hash,
+        eth_block_number: receipt?.blockNumber,
+        solana_signature: solanaSignature,
+        solana_signature_hash: solanaTxHash
+      });
+    } catch (error: any) {
+      log({
+        event: 'ethereum_mark_relayed_failed',
+        level: 'error',
+        nonce,
+        solana_signature: solanaSignature,
+        error: error.message
+      });
     }
   }
 

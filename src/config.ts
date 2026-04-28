@@ -38,6 +38,7 @@ export function loadConfig(): Config {
   const config: Config = {
     ETH_RPC_URL: getEnvVar('ETH_RPC_URL'),
     ETH_BRIDGE_ADDRESS: getEnvVar('ETH_BRIDGE_ADDRESS'),
+    ETH_RELAYER_PRIVATE_KEY: getEnvVar('ETH_RELAYER_PRIVATE_KEY'),
     ETH_CONFIRMATIONS: getEnvNumber('ETH_CONFIRMATIONS', 3),
     ETH_START_BLOCK: getEnvNumber('ETH_START_BLOCK'),
     SOL_RPC_URL: getEnvVar('SOL_RPC_URL'),
@@ -52,6 +53,10 @@ export function loadConfig(): Config {
   // Validate Ethereum address format
   if (!config.ETH_BRIDGE_ADDRESS.startsWith('0x') || config.ETH_BRIDGE_ADDRESS.length !== 42) {
     throw new Error(`Invalid Ethereum bridge address: ${config.ETH_BRIDGE_ADDRESS}`);
+  }
+
+  if (!config.ETH_RELAYER_PRIVATE_KEY.startsWith('0x') || config.ETH_RELAYER_PRIVATE_KEY.length !== 66) {
+    throw new Error('Invalid ETH_RELAYER_PRIVATE_KEY format');
   }
 
   // Validate RPC URLs

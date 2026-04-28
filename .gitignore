@@ -1,14 +1,42 @@
+.env
+.env.*
+!.env.example
+
+# ========================
+# Node / relayer
+# ========================
+node_modules/
 dist/
+build/
 *.log
 
+# ========================
 # Anchor / Solana
+# ========================
 target/
 .anchor/
 *.so
 test-ledger/
-node_modules/
 
 # But keep the program keypair so deploys are reproducible
 !target/deploy/
 target/deploy/*
 !target/deploy/bridge-keypair.json
+
+# ========================
+# OS
+# ========================
+.DS_Store
+Thumbs.db
+
+# ========================
+# IDE
+# ========================
+.vscode/
+.idea/
+
+# ========================
+# temp
+# ========================
+tmp/
+temp/
