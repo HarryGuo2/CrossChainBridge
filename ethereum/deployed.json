@@ -1,0 +1,10 @@
+{
+  "network": "sepolia",
+  "token": "0xD5f971eb46775DbD815ab866dfE888492ACF7062",
+  "bridge": "0xB2F3B8465c6AB97ba8a7D5Bb813A914d29a5dd24",
+  "relayers": [
+    "0x13f60aA67a17572f8e567880E860538435460300"
+  ],
+  "threshold": 1,
+  "deployedAt": "2026-04-10T22:14:13.577Z"
+}
