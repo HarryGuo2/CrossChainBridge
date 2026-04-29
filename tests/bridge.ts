@@ -509,6 +509,58 @@ describe("bridge", () => {
     });
   });
 
+  describe("set_source_binding", () => {
+    it("admin can update source binding fields", async () => {
+      const newBridge = Buffer.alloc(20, 0x42);
+      const newToken = Buffer.alloc(20, 0x99);
+      const NEW_CHAIN_ID = 7;
+
+      await program.methods
+        .setSourceBinding({
+          sourceChainId: NEW_CHAIN_ID,
+          sourceBridge: Array.from(newBridge),
+          sourceToken: Array.from(newToken),
+        })
+        .accounts({ admin: admin.publicKey, config: configPda })
+        .rpc();
+
+      const cfg = await program.account.bridgeConfig.fetch(configPda);
+      expect(cfg.sourceChainId).to.equal(NEW_CHAIN_ID);
+      expect(Buffer.from(cfg.sourceBridge).equals(newBridge)).to.equal(true);
+      expect(Buffer.from(cfg.sourceToken).equals(newToken)).to.equal(true);
+
+      // Restore original values for downstream tests.
+      await program.methods
+        .setSourceBinding({
+          sourceChainId: SOURCE_CHAIN_ID,
+          sourceBridge: Array.from(SOURCE_BRIDGE),
+          sourceToken: Array.from(SOURCE_TOKEN),
+        })
+        .accounts({ admin: admin.publicKey, config: configPda })
+        .rpc();
+    });
+
+    it("non-admin cannot update source binding", async () => {
+      const intruder = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(intruder.publicKey, LAMPORTS_PER_SOL);
+      await provider.connection.confirmTransaction(sig);
+      try {
+        await program.methods
+          .setSourceBinding({
+            sourceChainId: 999,
+            sourceBridge: Array.from(Buffer.alloc(20, 0xff)),
+            sourceToken: Array.from(Buffer.alloc(20, 0xff)),
+          })
+          .accounts({ admin: intruder.publicKey, config: configPda })
+          .signers([intruder])
+          .rpc();
+        expect.fail("expected UnauthorizedAdmin");
+      } catch (e: any) {
+        expect(e.toString()).to.match(/UnauthorizedAdmin/);
+      }
+    });
+  });
+
   describe("mint_wrapped replay protection", () => {
     const recipient = Keypair.generate();
     const nonce = 200n;

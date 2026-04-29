@@ -26,6 +26,10 @@ pub mod bridge {
         instructions::set_relayer::handler(ctx, new_relayer)
     }
 
+    pub fn set_source_binding(ctx: Context<SetSourceBinding>, args: SetSourceBindingArgs) -> Result<()> {
+        instructions::set_source_binding::handler(ctx, args)
+    }
+
     pub fn mint_wrapped(ctx: Context<MintWrapped>, payload: BridgePayload) -> Result<()> {
         instructions::mint_wrapped::handler(ctx, payload)
     }

@@ -1,8 +1,10 @@
 pub mod initialize;
 pub mod set_paused;
 pub mod set_relayer;
+pub mod set_source_binding;
 pub mod mint_wrapped;
 pub use initialize::*;
 pub use set_paused::*;
 pub use set_relayer::*;
+pub use set_source_binding::*;
 pub use mint_wrapped::*;
