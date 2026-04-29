@@ -157,13 +157,20 @@ deterministically: create mint, transfer authority, initialize config. It then
 prints all the values the relayer team needs in their `.env`. I smoke-tested
 this against a local validator end-to-end before considering the script done.
 
-The actual Devnet deploy has not yet been completed — the deployer keypair
-needed Devnet SOL that the public airdrop endpoint refused to grant during
-implementation. Once the keypair is funded (≥3 SOL via the web faucet), running
-`anchor deploy --provider.cluster devnet && npm run anchor:initialize` produces
-the same artifacts I verified locally.
+The initial Devnet deployment used placeholder ETH source addresses (all-zero
+bytes) for `source_bridge` and `source_token`, because Yang's `EthBridge.sol`
+and `TestToken.sol` contracts had not yet been deployed to Sepolia at that time.
+Rather than redeploying the entire program once the real addresses became
+available, I added a `set_source_binding` admin-only instruction. This
+instruction lets the admin update the three source-binding fields
+(`source_chain_id`, `source_bridge`, `source_token`) on the existing
+`BridgeConfig` account without touching the program binary or the wrapped mint.
+After Yang confirmed his Sepolia deployments, I ran `npm run anchor:update-source`
+against Devnet to set the real addresses in-place: bridge contract
+`0xb2f3b8465c6ab97ba8a7d5bb813a914d29a5dd24`, token contract
+`0xd5f971eb46775dbd815ab866dfe888492acf7062`.
 
-The values I will hand to the relayer team after Devnet deployment:
+The values handed to the relayer team after Devnet deployment:
 - Program ID (already fixed: `FaWcnbmoyN1SWfUaio4cJAC2HokPgukzKhhk1hZrh4De`)
 - Wrapped mint pubkey
 - BridgeConfig PDA (purely informational; they derive it themselves)
@@ -180,9 +187,6 @@ The values I will hand to the relayer team after Devnet deployment:
 2. **On-chain ATA `init_if_needed`.** Moving ATA creation into the program
    would simplify the relayer at the cost of a more careful re-init check.
    Doable, just not worth the risk on a tight deadline.
-3. **A `set_source_binding` admin instruction.** Right now, if Yang's contract
-   address changes, the only fix is `solana program close` and a fresh
-   deployment. A small admin-only setter would make this less painful.
-4. **Pre-flight balance check in `mint_wrapped`.** Catching an under-funded
+3. **Pre-flight balance check in `mint_wrapped`.** Catching an under-funded
    relayer earlier would produce a friendlier error than the Solana runtime's
    default insufficient-funds message.

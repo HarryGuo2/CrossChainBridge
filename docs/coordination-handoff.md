@@ -109,7 +109,7 @@ SOL_AUTHORIZED_RELAYER=...     # the relayer pubkey we initialized BridgeConfig 
 
 ## Devnet deployment artifacts
 
-**Status as of 2026-04-26: Deployed to Devnet.** Program deployed with signature `5mhZbZiWSuunNUDQcdQo9pmNFRUfb2wb2kyPzEJ1eFSa33BPbCpTy6A9dtPSu9Kj3evGfCyJDXzPhN5s8GYnMjaT`. BridgeConfig initialized with placeholder source addresses (`0x0000…`) — these will need to be reset once Yang's `EthBridge.sol` and `TestToken.sol` Sepolia addresses are available (BridgeConfig has no setter for source bindings; redeploy via `solana program close <PROGRAM_ID>` + fresh `anchor deploy` + re-`initialize` is the workaround).
+**Status as of 2026-04-29: Deployed and updated on Devnet.** Program deployed with signature `5mhZbZiWSuunNUDQcdQo9pmNFRUfb2wb2kyPzEJ1eFSa33BPbCpTy6A9dtPSu9Kj3evGfCyJDXzPhN5s8GYnMjaT`. BridgeConfig source addresses set to Yang's deployed Sepolia contracts via `set_source_binding` (upgrade sig: `3wti7gzUShGnwEKCNyZLioZu6rkdhzb5TS88Vz2oDmq8ncrANxBQBYvmRLzLJjqGSFJE2j2Mw1VpXx16hfScjgWZ`): bridge `0xb2f3b8465c6ab97ba8a7d5bb813a914d29a5dd24`, token `0xd5f971eb46775dbd815ab866dfe888492acf7062`. To rebind source addresses in the future without redeploying, run `npm run anchor:update-source` (see `migrations/update-source-binding.ts`) with the appropriate `ETH_BRIDGE_ADDRESS`, `ETH_TOKEN_ADDRESS`, `SOURCE_CHAIN_ID`, `ANCHOR_PROVIDER_URL`, and `ANCHOR_WALLET` environment variables.
 
 ```
 SOL_PROGRAM_ID=FaWcnbmoyN1SWfUaio4cJAC2HokPgukzKhhk1hZrh4De
@@ -145,4 +145,4 @@ await program.methods.setRelayer(new PublicKey('<NEW_RELAYER_PUBKEY>'))
 - If the relayer encodes a string-based payload, `mintWrapped` fails on the first call (Borsh size mismatch).
 - If the ATA pre-instruction is forgotten, `mintWrapped` fails with `AccountNotInitialized`.
 - If `ETH_TOKEN_ADDRESS` doesn't match what was passed to `initialize`, every mint fails with `InvalidSource`.
-- If `BridgeConfig` was initialized with placeholder addresses (zeros), every real mint will fail with `InvalidSource` until the program is redeployed/reinitialized with real addresses (see Devnet section above for re-initialization workaround).
+- If `BridgeConfig` source addresses ever need updating (e.g., contract redeployment on Sepolia), run `npm run anchor:update-source` — no program redeploy needed.
