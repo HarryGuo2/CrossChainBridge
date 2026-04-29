@@ -10,7 +10,8 @@
     "clean": "rm -rf dist",
     "anchor:build": "anchor build && cp target/idl/bridge.json idl/bridge.json",
     "anchor:test": "anchor test",
-    "anchor:initialize": "ts-node migrations/deploy.ts"
+    "anchor:initialize": "ts-node migrations/deploy.ts",
+    "anchor:update-source": "ts-node migrations/update-source-binding.ts"
   },
   "dependencies": {
     "ethers": "^6.8.1",

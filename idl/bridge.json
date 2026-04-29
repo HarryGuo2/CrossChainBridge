@@ -83,6 +83,29 @@
       ]
     },
     {
+      "name": "setSourceBinding",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": "SetSourceBindingArgs"
+          }
+        }
+      ]
+    },
+    {
       "name": "mintWrapped",
       "accounts": [
         {
@@ -244,6 +267,36 @@
             "name": "authorizedRelayer",
             "type": "publicKey"
           },
+          {
+            "name": "sourceChainId",
+            "type": "u16"
+          },
+          {
+            "name": "sourceBridge",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
+          },
+          {
+            "name": "sourceToken",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "SetSourceBindingArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
           {
             "name": "sourceChainId",
             "type": "u16"
