@@ -1,7 +1,8 @@
 import { ethers } from 'ethers';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
-import { PublicKey } from '@solana/web3.js';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const bs58 = require('bs58') as { encode: (buf: Buffer) => string; decode: (str: string) => Buffer };
 import { Config, BridgeMessage } from './types';
 import { RelayerDB } from './db';
 
@@ -14,7 +15,7 @@ function log(context: any): void {
 }
 
 const BRIDGE_ABI = [
-  "event Locked(uint64 indexed nonce, address indexed sender, bytes32 recipient, address token, uint256 amount, string sourceChain, string targetChain, bytes32 sourceTxHash)"
+  "event TokensLocked(address indexed token, address indexed sender, bytes32 indexed recipient, uint256 amount, uint256 nonce)"
 ];
 
 export class EthListener extends EventEmitter {
@@ -155,7 +156,7 @@ export class EthListener extends EventEmitter {
       const filter = {
         address: this.config.ETH_BRIDGE_ADDRESS,
         topics: [
-          ethers.id("Locked(uint64,address,bytes32,address,uint256,string,string,bytes32)")
+          ethers.id("TokensLocked(address,address,bytes32,uint256,uint256)")
         ],
         fromBlock,
         toBlock
@@ -210,6 +211,7 @@ export class EthListener extends EventEmitter {
       const args = parsedLog.args;
       const nonce = args.nonce.toString();
       const sourceTxHash = logEntry.transactionHash;
+      const logIndex = logEntry.index ?? 0;
 
       log({
         event: 'event_detected',
@@ -218,9 +220,8 @@ export class EthListener extends EventEmitter {
         recipient: args.recipient,
         token: args.token,
         amount: args.amount.toString(),
-        source_chain: args.sourceChain,
-        target_chain: args.targetChain,
         tx_hash: sourceTxHash,
+        log_index: logIndex,
         block: logEntry.blockNumber
       });
 
@@ -239,7 +240,7 @@ export class EthListener extends EventEmitter {
       await this.waitForConfirmations(sourceTxHash, logEntry.blockNumber || 0);
 
       // Create bridge message
-      const bridgeMessage = this.createBridgeMessage(args, sourceTxHash);
+      const bridgeMessage = this.createBridgeMessage(args, sourceTxHash, logIndex);
 
       // Insert into database
       this.db.insertMessage(bridgeMessage);
@@ -305,7 +306,7 @@ export class EthListener extends EventEmitter {
     }
   }
 
-  private createBridgeMessage(args: any, sourceTxHash: string): BridgeMessage {
+  private createBridgeMessage(args: any, sourceTxHash: string, logIndex: number): BridgeMessage {
     const nonce = args.nonce.toString();
     const id = crypto
       .createHash('sha256')
@@ -317,13 +318,14 @@ export class EthListener extends EventEmitter {
     return {
       id,
       nonce,
-      sender: args.sender,
+      sender: (args.sender as string).toLowerCase(),
       recipient: this.decodeRecipient(args.recipient),
       token: args.token,
       amount: args.amount.toString(),
-      sourceChain: args.sourceChain,
-      targetChain: args.targetChain,
+      sourceChain: 'ethereum',
+      targetChain: 'solana',
       sourceTxHash,
+      logIndex,
       status: 'pending',
       retryCount: 0,
       createdAt: now,
@@ -332,12 +334,7 @@ export class EthListener extends EventEmitter {
   }
 
   private decodeRecipient(recipientBytes32: string): string {
-    const bytes = ethers.getBytes(recipientBytes32);
-    if (bytes.length !== 32) {
-      throw new Error(`Invalid bytes32 recipient length: ${bytes.length}`);
-    }
-
-    return new PublicKey(bytes).toBase58();
+    return bs58.encode(Buffer.from((recipientBytes32 as string).slice(2), 'hex'));
   }
 
   private sleep(ms: number): Promise<void> {

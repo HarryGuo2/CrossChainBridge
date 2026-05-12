@@ -42,12 +42,20 @@ export class RelayerDB {
         sourceChain TEXT NOT NULL,
         targetChain TEXT NOT NULL,
         sourceTxHash TEXT NOT NULL,
+        logIndex INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL CHECK(status IN ('pending', 'submitted', 'delivered', 'failed')),
         retryCount INTEGER NOT NULL DEFAULT 0,
         createdAt INTEGER NOT NULL,
         updatedAt INTEGER NOT NULL
       )
     `);
+
+    // Non-destructive migration: add logIndex column if it does not exist yet
+    try {
+      this.db.exec(`ALTER TABLE messages ADD COLUMN logIndex INTEGER NOT NULL DEFAULT 0`);
+    } catch {
+      // Column already exists — ignore
+    }
 
     // Create indexes for performance
     this.db.exec(`
@@ -73,8 +81,8 @@ export class RelayerDB {
     const stmt = this.db.prepare(`
       INSERT INTO messages (
         id, nonce, sender, recipient, token, amount, sourceChain,
-        targetChain, sourceTxHash, status, retryCount, createdAt, updatedAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        targetChain, sourceTxHash, logIndex, status, retryCount, createdAt, updatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     try {
@@ -88,6 +96,7 @@ export class RelayerDB {
         msg.sourceChain,
         msg.targetChain,
         msg.sourceTxHash,
+        msg.logIndex,
         msg.status,
         msg.retryCount,
         msg.createdAt,
@@ -169,6 +178,7 @@ export class RelayerDB {
       sourceChain: row.sourceChain,
       targetChain: row.targetChain,
       sourceTxHash: row.sourceTxHash,
+      logIndex: row.logIndex ?? 0,
       status: row.status as BridgeMessage['status'],
       retryCount: row.retryCount,
       createdAt: row.createdAt,

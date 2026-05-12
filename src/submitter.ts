@@ -14,13 +14,15 @@ import {
 import {
   getAssociatedTokenAddress,
   TOKEN_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID
+  createAssociatedTokenAccountIdempotentInstruction
 } from '@solana/spl-token';
 import { ethers } from 'ethers';
 import * as fs from 'fs';
 import { Config, BridgeMessage } from './types';
 import { RelayerDB } from './db';
 import idl from '../idl/bridge.json';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const bs58 = require('bs58') as { encode: (buf: Buffer) => string; decode: (str: string) => Uint8Array };
 
 function log(context: any): void {
   console.log(JSON.stringify({
@@ -35,9 +37,10 @@ export class SolanaSubmitter {
   private relayerKeypair: Keypair;
   private program: Program;
   private db: RelayerDB;
+  private config: Config;
   private programId: PublicKey;
   private wrappedMint: PublicKey;
-  private ethBridge: ethers.Contract;
+  private ethBridge: ethers.Contract | null;
 
   private static readonly ETH_BRIDGE_ABI = [
     'function markRelayed(uint64 nonce, bytes32 solanaTxHash) external'
@@ -45,6 +48,7 @@ export class SolanaSubmitter {
 
   constructor(config: Config, db: RelayerDB) {
     this.db = db;
+    this.config = config;
 
     this.connection = new Connection(config.SOL_RPC_URL, 'confirmed');
     this.programId = new PublicKey(config.SOL_PROGRAM_ID);
@@ -64,13 +68,19 @@ export class SolanaSubmitter {
 
     this.program = new Program(idl as any, this.programId, provider);
 
-    const ethProvider = new ethers.JsonRpcProvider(config.ETH_RPC_URL);
-    const ethSigner = new ethers.Wallet(config.ETH_RELAYER_PRIVATE_KEY, ethProvider);
-    this.ethBridge = new ethers.Contract(
-      config.ETH_BRIDGE_ADDRESS,
-      SolanaSubmitter.ETH_BRIDGE_ABI,
-      ethSigner
-    );
+    // Ethereum signer is optional — only needed for the markRelayed callback
+    if (config.ETH_RELAYER_PRIVATE_KEY) {
+      const ethProvider = new ethers.JsonRpcProvider(config.ETH_RPC_URL);
+      const ethSigner = new ethers.Wallet(config.ETH_RELAYER_PRIVATE_KEY, ethProvider);
+      this.ethBridge = new ethers.Contract(
+        config.ETH_BRIDGE_ADDRESS,
+        SolanaSubmitter.ETH_BRIDGE_ABI,
+        ethSigner
+      );
+    } else {
+      this.ethBridge = null;
+      log({ event: 'eth_mark_relayed_disabled', level: 'warn', reason: 'ETH_RELAYER_PRIVATE_KEY not set' });
+    }
 
     log({
       event: 'solana_submitter_initialized',
@@ -100,70 +110,97 @@ export class SolanaSubmitter {
         throw new Error(`Insufficient relayer balance: ${balance / LAMPORTS_PER_SOL} SOL`);
       }
 
-      // Derive accounts
-      const recipientPubkey = new PublicKey(msg.recipient);
+      const SOURCE_CHAIN_ID = 1;
 
+      // Decode byte buffers from message fields
+      const sourceBridgeBytes = Buffer.from(this.config.ETH_BRIDGE_ADDRESS.replace(/^0x/, ''), 'hex');
+      const sourceTokenBytes  = Buffer.from(this.config.ETH_TOKEN_ADDRESS.replace(/^0x/, ''), 'hex');
+      const senderBytes       = Buffer.from(msg.sender.replace(/^0x/, ''), 'hex');
+      const recipientSolBytes = Buffer.from(bs58.decode(msg.recipient));
+      const sourceTxHashBytes = Buffer.from(msg.sourceTxHash.replace(/^0x/, ''), 'hex');
+
+      if (sourceBridgeBytes.length !== 20) throw new Error('ETH_BRIDGE_ADDRESS must be 20 bytes');
+      if (sourceTokenBytes.length !== 20)  throw new Error('ETH_TOKEN_ADDRESS must be 20 bytes');
+      if (senderBytes.length !== 20)       throw new Error('sender must be 20 bytes');
+      if (recipientSolBytes.length !== 32) throw new Error('recipient (base58) must decode to 32 bytes');
+      if (sourceTxHashBytes.length !== 32) throw new Error('sourceTxHash must be 32 bytes');
+
+      const amountBN = new BN(msg.amount);
+      if (amountBN.bitLength() > 64) throw new Error('amount exceeds u64::MAX');
+
+      // Build the fixed-width binary BridgePayload
+      const bridgePayload = {
+        version: 1,
+        sourceChainId: SOURCE_CHAIN_ID,
+        sourceBridge: Array.from(sourceBridgeBytes),
+        sourceToken:  Array.from(sourceTokenBytes),
+        nonce:  new BN(msg.nonce),
+        amount: amountBN,
+        senderEth:    Array.from(senderBytes),
+        recipientSol: Array.from(recipientSolBytes),
+        sourceTxHash: Array.from(sourceTxHashBytes),
+        sourceLogIndex: msg.logIndex ?? 0,
+      };
+
+      // Derive the ProcessedMessage PDA: ["processed", chainLE2, bridge20, nonceLE8]
+      const chainBuf = Buffer.alloc(2);
+      chainBuf.writeUInt16LE(SOURCE_CHAIN_ID, 0);
+      const nonceBuf = Buffer.alloc(8);
+      nonceBuf.writeBigUInt64LE(BigInt(msg.nonce), 0);
       const [processedMessagePda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("processed"), Buffer.from(msg.nonce)],
+        [Buffer.from('processed'), chainBuf, sourceBridgeBytes, nonceBuf],
         this.programId
       );
 
+      // Derive BridgeConfig and mintAuthority PDAs deterministically
+      const [configPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('config')],
+        this.programId
+      );
+      const [mintAuthorityPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('mint_authority')],
+        this.programId
+      );
+
+      const recipientPubkey = new PublicKey(msg.recipient);
       const recipientAta = await getAssociatedTokenAddress(
         this.wrappedMint,
         recipientPubkey
       );
 
-      // Build bridge payload
-      const bridgePayload = {
-        nonce: new BN(msg.nonce),
-        sender: msg.sender,
-        recipient: msg.recipient,
-        token: msg.token,
-        amount: new BN(msg.amount),
-        sourceChain: msg.sourceChain,
-        targetChain: msg.targetChain,
-        sourceTxHash: msg.sourceTxHash
-      };
+      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        this.relayerKeypair.publicKey,
+        recipientAta,
+        recipientPubkey,
+        this.wrappedMint
+      );
 
       log({
         event: 'solana_accounts_derived',
         id: msg.id,
+        config_pda: configPda.toBase58(),
         processed_message_pda: processedMessagePda.toBase58(),
+        mint_authority_pda: mintAuthorityPda.toBase58(),
         recipient_ata: recipientAta.toBase58(),
         recipient: recipientPubkey.toBase58()
       });
 
-      // Create transaction
-      const tx = await this.program.methods
+      const signature = await this.program.methods
         .mintWrapped(bridgePayload)
         .accounts({
           relayer: this.relayerKeypair.publicKey,
+          config: configPda,
           processedMessage: processedMessagePda,
           wrappedMint: this.wrappedMint,
+          mintAuthority: mintAuthorityPda,
           recipient: recipientPubkey,
           recipientTokenAccount: recipientAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId
+          systemProgram: SystemProgram.programId,
         })
-        .transaction();
-
-      // Get recent blockhash
-      const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash();
-      tx.recentBlockhash = blockhash;
-      tx.feePayer = this.relayerKeypair.publicKey;
-
-      // Sign and send transaction
-      tx.sign(this.relayerKeypair);
-
-      const signature = await this.connection.sendRawTransaction(
-        tx.serialize(),
-        {
-          skipPreflight: false,
-          preflightCommitment: 'confirmed',
-          maxRetries: 3
-        }
-      );
+        .preInstructions([createAtaIx])
+        .signers([this.relayerKeypair])
+        .rpc();
 
       log({
         event: 'solana_transaction_sent',
@@ -173,6 +210,8 @@ export class SolanaSubmitter {
       });
 
       // Confirm transaction
+      const { lastValidBlockHeight } = await this.connection.getLatestBlockhash();
+      const { blockhash } = await this.connection.getLatestBlockhash();
       const confirmation = await this.connection.confirmTransaction({
         signature,
         blockhash,
@@ -303,6 +342,10 @@ export class SolanaSubmitter {
   }
 
   private async markRelayedOnEthereum(nonce: string, solanaSignature: string): Promise<void> {
+    if (!this.ethBridge) {
+      log({ event: 'eth_mark_relayed_skipped', level: 'warn', nonce, reason: 'no ETH signer configured' });
+      return;
+    }
     try {
       const solanaTxHash = ethers.keccak256(ethers.toUtf8Bytes(solanaSignature));
       const tx = await this.ethBridge.markRelayed(BigInt(nonce), solanaTxHash);

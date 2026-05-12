@@ -8,6 +8,7 @@ export interface BridgeMessage {
   sourceChain: string;
   targetChain: string;
   sourceTxHash: string;
+  logIndex: number;          // Ethereum log index for replay protection
   status: 'pending' | 'submitted' | 'delivered' | 'failed';
   retryCount: number;
   createdAt: number;         // unix ms
@@ -17,13 +18,17 @@ export interface BridgeMessage {
 export interface Config {
   ETH_RPC_URL: string;
   ETH_BRIDGE_ADDRESS: string;
-  ETH_RELAYER_PRIVATE_KEY: string;
+  ETH_TOKEN_ADDRESS: string;
+  ETH_RELAYER_PRIVATE_KEY?: string;  // optional: only needed for markRelayed callback
   ETH_CONFIRMATIONS: number;
   ETH_START_BLOCK: number;
   SOL_RPC_URL: string;
   SOL_PROGRAM_ID: string;
   SOL_WRAPPED_MINT: string;
   SOL_RELAYER_KEYPAIR: string;
+  SOL_BRIDGE_CONFIG?: string;
+  SOL_MINT_AUTHORITY?: string;
+  SOL_AUTHORIZED_RELAYER: string;
   RETRY_INTERVAL_MS: number;
   POLL_INTERVAL_MS: number;
   DB_PATH: string;
