@@ -1,3 +1,12 @@
+// Load .env so this script can be invoked as `npm run demo:replay -- --tx 0x…`
+// without the caller having to export ETH_RPC_URL, ANCHOR_PROVIDER_URL, etc.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+try { require("dotenv").config(); } catch { /* optional */ }
+
+// Map the relayer's .env names into the Anchor-provider names.
+process.env.ANCHOR_PROVIDER_URL ??= process.env.SOL_RPC_URL;
+process.env.ANCHOR_WALLET       ??= process.env.SOL_RELAYER_KEYPAIR;
+
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
