@@ -42,12 +42,48 @@ export class RelayerDB {
         sourceChain TEXT NOT NULL,
         targetChain TEXT NOT NULL,
         sourceTxHash TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pending', 'submitted', 'delivered', 'failed')),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'submitted', 'delivered', 'failed', 'dead')),
         retryCount INTEGER NOT NULL DEFAULT 0,
         createdAt INTEGER NOT NULL,
         updatedAt INTEGER NOT NULL
       )
     `);
+
+    // Migrate older DBs whose CHECK constraint lacks 'dead'. SQLite can't ALTER
+    // a CHECK in place, so we detect via sqlite_master and rebuild only if
+    // needed. Idempotent and safe to run every boot.
+    try {
+      const tblSql = (this.db
+        .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'`)
+        .get() as any)?.sql || '';
+      if (tblSql && !tblSql.includes("'dead'")) {
+        log({ event: 'db_migrating_dead_status' });
+        this.db.exec(`
+          BEGIN;
+          CREATE TABLE messages_new (
+            id TEXT PRIMARY KEY,
+            nonce TEXT NOT NULL,
+            sender TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            token TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            sourceChain TEXT NOT NULL,
+            targetChain TEXT NOT NULL,
+            sourceTxHash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'submitted', 'delivered', 'failed', 'dead')),
+            retryCount INTEGER NOT NULL DEFAULT 0,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL
+          );
+          INSERT INTO messages_new SELECT * FROM messages;
+          DROP TABLE messages;
+          ALTER TABLE messages_new RENAME TO messages;
+          COMMIT;
+        `);
+      }
+    } catch (e: any) {
+      log({ event: 'db_migration_dead_skip', level: 'warn', error: e.message });
+    }
 
     // Create indexes for performance
     this.db.exec(`
@@ -150,15 +186,27 @@ export class RelayerDB {
     });
   }
 
-  getUndelivered(): BridgeMessage[] {
+  // Returns messages that still need work. Includes:
+  //   - pending  (just inserted, never tried)
+  //   - failed   (transient failure, still under retry cap)
+  //   - submitted that have been stuck for `stuckAfterMs` — these are messages
+  //     where we updated status to 'submitted' but crashed (or the RPC hung)
+  //     before reaching 'delivered' or 'failed'. Without this clause they sit
+  //     forever invisible to the retry loop.
+  getUndelivered(stuckAfterMs: number = 60_000, maxRetries: number = 5): BridgeMessage[] {
+    const stuckBefore = Date.now() - stuckAfterMs;
     const stmt = this.db.prepare(`
       SELECT * FROM messages
-      WHERE (status = 'pending' OR status = 'failed')
-        AND retryCount < 5
+      WHERE retryCount < ?
+        AND (
+          status = 'pending'
+          OR status = 'failed'
+          OR (status = 'submitted' AND updatedAt < ?)
+        )
       ORDER BY createdAt ASC
     `);
 
-    const rows = stmt.all() as any[];
+    const rows = stmt.all(maxRetries, stuckBefore) as any[];
     const messages = rows.map(row => ({
       id: row.id,
       nonce: row.nonce,
@@ -181,6 +229,44 @@ export class RelayerDB {
     });
 
     return messages;
+  }
+
+  // Recover orphaned 'submitted' rows on startup: anything stuck in 'submitted'
+  // when we boot is by definition an unfinished previous run. Flip them back to
+  // 'pending' so the retry loop picks them up. We don't increment retryCount —
+  // the previous attempt didn't actually fail, it was interrupted.
+  recoverStuckSubmitted(): number {
+    const stmt = this.db.prepare(`
+      UPDATE messages
+      SET status = 'pending', updatedAt = ?
+      WHERE status = 'submitted'
+    `);
+    const result = stmt.run(Date.now());
+    if (result.changes > 0) {
+      log({
+        event: 'stuck_submitted_recovered',
+        level: 'warn',
+        count: result.changes
+      });
+    }
+    return result.changes;
+  }
+
+  // Mark a message as permanently undeliverable. Used for things like malformed
+  // recipient pubkeys, where retrying just burns fees and log space.
+  markDead(id: string, reason: string): void {
+    const stmt = this.db.prepare(`
+      UPDATE messages SET status = 'dead', updatedAt = ? WHERE id = ?
+    `);
+    const result = stmt.run(Date.now(), id);
+    if (result.changes > 0) {
+      log({
+        event: 'message_marked_dead',
+        level: 'warn',
+        id,
+        reason
+      });
+    }
   }
 
   getLastProcessedBlock(): number {
@@ -224,14 +310,15 @@ export class RelayerDB {
     return !!result;
   }
 
-  getStats(): { total: number; pending: number; submitted: number; delivered: number; failed: number } {
+  getStats(): { total: number; pending: number; submitted: number; delivered: number; failed: number; dead: number } {
     const stmt = this.db.prepare(`
       SELECT
         COUNT(*) as total,
         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
         SUM(CASE WHEN status = 'submitted' THEN 1 ELSE 0 END) as submitted,
         SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) as delivered,
-        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END) as dead
       FROM messages
     `);
 
@@ -241,7 +328,8 @@ export class RelayerDB {
       pending: result.pending || 0,
       submitted: result.submitted || 0,
       delivered: result.delivered || 0,
-      failed: result.failed || 0
+      failed: result.failed || 0,
+      dead: result.dead || 0
     };
   }
 
