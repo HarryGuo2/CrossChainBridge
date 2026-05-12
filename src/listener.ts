@@ -89,9 +89,33 @@ export class EthListener extends EventEmitter {
 
   private async pollLoop(fromBlock: number): Promise<void> {
     let currentFromBlock = fromBlock;
+    const MAX_LAG = 100;
 
     while (this.isRunning) {
       try {
+        // Free-tier eth_getLogs is capped at 10 blocks per call. If we are too far
+        // behind the chain head we will never catch up at 10 blocks per poll, so
+        // jump close to head and let any older events be queried via Etherscan
+        // backfill (out of scope for live polling).
+        try {
+          const head = await this.provider.getBlockNumber();
+          if (head - currentFromBlock > MAX_LAG) {
+            const jumpTo = Math.max(head - 10, currentFromBlock);
+            log({
+              event: 'eth_listener_jump_ahead',
+              level: 'warn',
+              from_block: currentFromBlock,
+              to_block: jumpTo,
+              chain_head: head,
+              reason: 'lag_exceeds_threshold'
+            });
+            currentFromBlock = jumpTo;
+            this.db.saveLastProcessedBlock(jumpTo - 1);
+          }
+        } catch (_) {
+          // RPC hiccup — try again next iteration
+        }
+
         const processedUntil = await this.pollForEvents(currentFromBlock);
         if (processedUntil > currentFromBlock) {
           currentFromBlock = processedUntil + 1;
