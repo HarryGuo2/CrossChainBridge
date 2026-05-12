@@ -1,7 +1,6 @@
 import { ethers } from 'ethers';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
-import { PublicKey } from '@solana/web3.js';
 import { Config, BridgeMessage } from './types';
 import { RelayerDB } from './db';
 
@@ -23,7 +22,16 @@ export class EthListener extends EventEmitter {
   private config: Config;
   private db: RelayerDB;
   private isRunning: boolean = false;
-  private pollTimeout: NodeJS.Timeout | null = null;
+
+  // Track every active sleep timer so stop() can clear all of them at once.
+  // The previous single-handle approach was overwritten whenever a second
+  // sleep started (poll loop + waitForConfirmations running concurrently),
+  // which meant stop() could leave a timer dangling and shutdown stalled.
+  private activeTimers: Set<NodeJS.Timeout> = new Set();
+
+  // Resolvers for in-flight sleeps so stop() can wake them immediately rather
+  // than waiting up to ETH_CONFIRMATIONS * 5s for the current sleep to elapse.
+  private sleepResolvers: Set<() => void> = new Set();
 
   constructor(config: Config, db: RelayerDB) {
     super();
@@ -78,39 +86,51 @@ export class EthListener extends EventEmitter {
     log({ event: 'eth_listener_stopping' });
     this.isRunning = false;
 
-    if (this.pollTimeout) {
-      clearTimeout(this.pollTimeout);
-      this.pollTimeout = null;
-    }
+    // Clear every active timer and wake every active sleep. Without this, a
+    // listener in the middle of waitForConfirmations would sit for another
+    // 5–10s before noticing isRunning flipped to false.
+    for (const t of this.activeTimers) clearTimeout(t);
+    this.activeTimers.clear();
+    for (const r of this.sleepResolvers) r();
+    this.sleepResolvers.clear();
 
     log({ event: 'eth_listener_stopped' });
   }
 
   private async pollLoop(fromBlock: number): Promise<void> {
     let currentFromBlock = fromBlock;
+    let consecutiveErrors = 0;
 
     while (this.isRunning) {
       try {
         const processedUntil = await this.pollForEvents(currentFromBlock);
-        if (processedUntil > currentFromBlock) {
+        if (processedUntil >= currentFromBlock) {
           currentFromBlock = processedUntil + 1;
         }
+        consecutiveErrors = 0;
 
-        // Wait for next poll
         if (this.isRunning) {
           await this.sleep(this.config.POLL_INTERVAL_MS);
         }
       } catch (error: any) {
+        consecutiveErrors++;
+        // Exponential backoff up to 5 minutes — protects against RPC outages
+        // and rate limits. Without escalation the loop hammers a dead RPC at
+        // 2× POLL_INTERVAL forever, which gets us ratelimited harder.
+        const wait = Math.min(
+          this.config.POLL_INTERVAL_MS * Math.pow(2, consecutiveErrors),
+          5 * 60_000
+        );
         log({
           event: 'eth_polling_error',
           level: 'error',
           error: error.message,
-          from_block: currentFromBlock
+          from_block: currentFromBlock,
+          consecutive_errors: consecutiveErrors,
+          backoff_ms: wait
         });
-
-        // Wait before retrying on error
         if (this.isRunning) {
-          await this.sleep(Math.min(this.config.POLL_INTERVAL_MS * 2, 30000));
+          await this.sleep(wait);
         }
       }
     }
@@ -132,7 +152,7 @@ export class EthListener extends EventEmitter {
 
       const toBlock = Math.min(
         currentBlock - this.config.ETH_CONFIRMATIONS,
-        fromBlock + 9 // Limit to 10 blocks for Alchemy Free Tier
+        fromBlock + 999 // Limit to prevent RPC timeouts
       );
 
       if (toBlock < fromBlock) {
@@ -170,14 +190,43 @@ export class EthListener extends EventEmitter {
         to_block: toBlock
       });
 
+      // Track whether every log in the batch was successfully handed off.
+      // If any failed, we do NOT advance lastProcessedBlock past the failing
+      // block — next poll will re-scan and (because hasMessage is keyed on
+      // nonce) successful ones are skipped, failed ones get another shot.
+      let allOk = true;
+      let lastOkBlock = fromBlock - 1;
+
       for (const logEntry of logs) {
-        await this.processLogEntry(logEntry);
+        const ok = await this.processLogEntry(logEntry);
+        if (!ok) {
+          allOk = false;
+          // Re-scan from this block next time. Anything we already inserted
+          // is dedup'd by the unique-nonce constraint in db.insertMessage.
+          const stallBlock = logEntry.blockNumber ?? fromBlock;
+          if (stallBlock > 0) lastOkBlock = Math.min(lastOkBlock, stallBlock - 1);
+          break;
+        }
+        lastOkBlock = Math.max(lastOkBlock, logEntry.blockNumber ?? lastOkBlock);
       }
 
-      // Save progress
-      this.db.saveLastProcessedBlock(toBlock);
+      // If everything processed cleanly we can advance to toBlock. Otherwise
+      // advance only as far as the last fully-handled block so the failed
+      // entry gets re-fetched.
+      const advanceTo = allOk ? toBlock : Math.max(fromBlock - 1, lastOkBlock);
+      this.db.saveLastProcessedBlock(advanceTo);
 
-      return toBlock;
+      if (!allOk) {
+        log({
+          event: 'block_scan_partial',
+          level: 'warn',
+          from_block: fromBlock,
+          attempted_to: toBlock,
+          advanced_to: advanceTo
+        });
+      }
+
+      return advanceTo;
 
     } catch (error: any) {
       log({
@@ -190,23 +239,39 @@ export class EthListener extends EventEmitter {
     }
   }
 
-  private async processLogEntry(logEntry: ethers.Log): Promise<void> {
+  private async processLogEntry(logEntry: ethers.Log): Promise<boolean> {
+    // Returns true if processing reached a stable state (handed off OR known
+    // unprocessable), false if a transient error means we should re-scan.
+    let parsedLog;
     try {
-      const parsedLog = this.contract.interface.parseLog({
+      parsedLog = this.contract.interface.parseLog({
         topics: logEntry.topics as string[],
         data: logEntry.data
       });
+    } catch (e: any) {
+      // ABI decode failed. This is permanent — re-fetching the same log won't
+      // help. Log loudly and move past it so we don't stall the block pointer.
+      log({
+        event: 'log_parse_failed',
+        level: 'error',
+        tx_hash: logEntry.transactionHash,
+        block: logEntry.blockNumber,
+        error: e.message
+      });
+      return true;
+    }
 
-      if (!parsedLog) {
-        log({
-          event: 'log_parse_failed',
-          level: 'warn',
-          tx_hash: logEntry.transactionHash,
-          block: logEntry.blockNumber
-        });
-        return;
-      }
+    if (!parsedLog) {
+      log({
+        event: 'log_parse_null',
+        level: 'warn',
+        tx_hash: logEntry.transactionHash,
+        block: logEntry.blockNumber
+      });
+      return true;
+    }
 
+    try {
       const args = parsedLog.args;
       const nonce = args.nonce.toString();
       const sourceTxHash = logEntry.transactionHash;
@@ -224,7 +289,6 @@ export class EthListener extends EventEmitter {
         block: logEntry.blockNumber
       });
 
-      // Check if already processed
       if (this.db.hasMessage(nonce)) {
         log({
           event: 'event_already_processed',
@@ -232,16 +296,17 @@ export class EthListener extends EventEmitter {
           nonce,
           tx_hash: sourceTxHash
         });
-        return;
+        return true;
       }
 
-      // Wait for confirmations
-      await this.waitForConfirmations(sourceTxHash, logEntry.blockNumber || 0);
+      // Wait for confirmations. If this fails (RPC error), return false so the
+      // block pointer doesn't advance past us — we'll retry on the next poll.
+      const confirmed = await this.waitForConfirmations(sourceTxHash, logEntry.blockNumber || 0);
+      if (!confirmed) {
+        return false;
+      }
 
-      // Create bridge message
       const bridgeMessage = this.createBridgeMessage(args, sourceTxHash);
-
-      // Insert into database
       this.db.insertMessage(bridgeMessage);
 
       log({
@@ -251,10 +316,12 @@ export class EthListener extends EventEmitter {
         tx_hash: sourceTxHash
       });
 
-      // Emit event for submitter to pick up
       this.emit('message', bridgeMessage);
+      return true;
 
     } catch (error: any) {
+      // Transient processing error (DB hiccup, etc.) — let the next poll re-do
+      // this range. insertMessage is dedup'd on nonce so we won't double-emit.
       log({
         event: 'log_processing_error',
         level: 'error',
@@ -262,15 +329,33 @@ export class EthListener extends EventEmitter {
         tx_hash: logEntry.transactionHash,
         block: logEntry.blockNumber
       });
+      return false;
     }
   }
 
-  private async waitForConfirmations(txHash: string, logBlockNumber: number): Promise<void> {
+  private async waitForConfirmations(txHash: string, logBlockNumber: number): Promise<boolean> {
     const targetConfirmations = this.config.ETH_CONFIRMATIONS;
+    // Cap how long we'll sit on a single event. If the chain isn't producing
+    // blocks fast enough to confirm within this window, return false and let
+    // the next poll pick it up — don't hold the entire listener loop hostage.
+    const maxWaitMs = Math.max(60_000, targetConfirmations * 15_000);
+    const deadline = Date.now() + maxWaitMs;
+    let consecutiveErrors = 0;
 
     while (this.isRunning) {
+      if (Date.now() > deadline) {
+        log({
+          event: 'confirmation_wait_timeout',
+          level: 'warn',
+          tx_hash: txHash,
+          waited_ms: maxWaitMs
+        });
+        return false;
+      }
+
       try {
         const currentBlock = await this.provider.getBlockNumber();
+        consecutiveErrors = 0;
         const confirmations = currentBlock - logBlockNumber + 1;
 
         if (confirmations >= targetConfirmations) {
@@ -280,7 +365,7 @@ export class EthListener extends EventEmitter {
             confirmations,
             required: targetConfirmations
           });
-          return;
+          return true;
         }
 
         log({
@@ -291,18 +376,28 @@ export class EthListener extends EventEmitter {
           required: targetConfirmations
         });
 
-        await this.sleep(5000); // Wait 5 seconds before checking again
+        await this.sleep(5000);
 
       } catch (error: any) {
+        consecutiveErrors++;
         log({
           event: 'confirmation_check_error',
           level: 'error',
           error: error.message,
-          tx_hash: txHash
+          tx_hash: txHash,
+          consecutive_errors: consecutiveErrors
         });
-        await this.sleep(10000); // Wait longer on error
+        // After 3 consecutive RPC failures, give up on this log and let the
+        // outer poll loop retry the whole block range — that path has its own
+        // backoff and is the right place to handle prolonged RPC outages.
+        if (consecutiveErrors >= 3) {
+          return false;
+        }
+        await this.sleep(10000);
       }
     }
+    // Loop exited because isRunning went false (shutdown).
+    return false;
   }
 
   private createBridgeMessage(args: any, sourceTxHash: string): BridgeMessage {
@@ -318,7 +413,7 @@ export class EthListener extends EventEmitter {
       id,
       nonce,
       sender: args.sender,
-      recipient: this.decodeRecipient(args.recipient),
+      recipient: args.recipient,
       token: args.token,
       amount: args.amount.toString(),
       sourceChain: args.sourceChain,
@@ -331,18 +426,21 @@ export class EthListener extends EventEmitter {
     };
   }
 
-  private decodeRecipient(recipientBytes32: string): string {
-    const bytes = ethers.getBytes(recipientBytes32);
-    if (bytes.length !== 32) {
-      throw new Error(`Invalid bytes32 recipient length: ${bytes.length}`);
-    }
-
-    return new PublicKey(bytes).toBase58();
-  }
-
   private sleep(ms: number): Promise<void> {
+    // Re-entrant safe: each call gets its own timer + resolver, both tracked
+    // so stop() can wake them. Resolves either when the timer fires or when
+    // stop() forcibly drains the resolver set.
     return new Promise(resolve => {
-      this.pollTimeout = setTimeout(resolve, ms);
+      const wake = () => {
+        this.sleepResolvers.delete(wake);
+        resolve();
+      };
+      const t = setTimeout(() => {
+        this.activeTimers.delete(t);
+        wake();
+      }, ms);
+      this.activeTimers.add(t);
+      this.sleepResolvers.add(wake);
     });
   }
 }
