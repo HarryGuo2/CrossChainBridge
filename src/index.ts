@@ -31,13 +31,6 @@ async function main(): Promise<void> {
     // Initialize database
     db = new RelayerDB(config.DB_PATH);
 
-    // Recover any messages left in 'submitted' state by a previous crash. They
-    // were in-flight but never reached a terminal status; flip them back to
-    // 'pending' so the retry loop re-attempts. The on-chain idempotency check
-    // (PDA per nonce) means re-submitting a tx that actually landed last time
-    // will surface as ALREADY_PROCESSED and resolve cleanly.
-    db.recoverStuckSubmitted();
-
     // Initialize components
     listener = new EthListener(config, db);
     const submitter = new SolanaSubmitter(config, db);

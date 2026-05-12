@@ -38,13 +38,17 @@ export function loadConfig(): Config {
   const config: Config = {
     ETH_RPC_URL: getEnvVar('ETH_RPC_URL'),
     ETH_BRIDGE_ADDRESS: getEnvVar('ETH_BRIDGE_ADDRESS'),
-    ETH_RELAYER_PRIVATE_KEY: getEnvVar('ETH_RELAYER_PRIVATE_KEY'),
+    ETH_TOKEN_ADDRESS: getEnvVar('ETH_TOKEN_ADDRESS'),
+    ETH_RELAYER_PRIVATE_KEY: process.env['ETH_RELAYER_PRIVATE_KEY'],
     ETH_CONFIRMATIONS: getEnvNumber('ETH_CONFIRMATIONS', 3),
     ETH_START_BLOCK: getEnvNumber('ETH_START_BLOCK'),
     SOL_RPC_URL: getEnvVar('SOL_RPC_URL'),
     SOL_PROGRAM_ID: getEnvVar('SOL_PROGRAM_ID'),
     SOL_WRAPPED_MINT: getEnvVar('SOL_WRAPPED_MINT'),
     SOL_RELAYER_KEYPAIR: getEnvVar('SOL_RELAYER_KEYPAIR'),
+    SOL_BRIDGE_CONFIG: process.env['SOL_BRIDGE_CONFIG'],
+    SOL_MINT_AUTHORITY: process.env['SOL_MINT_AUTHORITY'],
+    SOL_AUTHORIZED_RELAYER: getEnvVar('SOL_AUTHORIZED_RELAYER'),
     RETRY_INTERVAL_MS: getEnvNumber('RETRY_INTERVAL_MS', 30000),
     POLL_INTERVAL_MS: getEnvNumber('POLL_INTERVAL_MS', 10000),
     DB_PATH: getEnvVar('DB_PATH', './relayer.db')
@@ -55,8 +59,14 @@ export function loadConfig(): Config {
     throw new Error(`Invalid Ethereum bridge address: ${config.ETH_BRIDGE_ADDRESS}`);
   }
 
-  if (!config.ETH_RELAYER_PRIVATE_KEY.startsWith('0x') || config.ETH_RELAYER_PRIVATE_KEY.length !== 66) {
-    throw new Error('Invalid ETH_RELAYER_PRIVATE_KEY format');
+  if (!config.ETH_TOKEN_ADDRESS.startsWith('0x') || config.ETH_TOKEN_ADDRESS.length !== 42) {
+    throw new Error(`Invalid Ethereum token address: ${config.ETH_TOKEN_ADDRESS}`);
+  }
+
+  if (config.ETH_RELAYER_PRIVATE_KEY !== undefined) {
+    if (!config.ETH_RELAYER_PRIVATE_KEY.startsWith('0x') || config.ETH_RELAYER_PRIVATE_KEY.length !== 66) {
+      throw new Error('Invalid ETH_RELAYER_PRIVATE_KEY format');
+    }
   }
 
   // Validate RPC URLs
@@ -90,11 +100,13 @@ export function loadConfig(): Config {
     event: 'config_loaded',
     eth_rpc: config.ETH_RPC_URL.split('/').slice(0, 3).join('/') + '/***',
     eth_bridge: config.ETH_BRIDGE_ADDRESS,
+    eth_token: config.ETH_TOKEN_ADDRESS,
     eth_confirmations: config.ETH_CONFIRMATIONS,
     eth_start_block: config.ETH_START_BLOCK,
     sol_rpc: config.SOL_RPC_URL.split('/').slice(0, 3).join('/') + '/***',
     sol_program: config.SOL_PROGRAM_ID,
     sol_mint: config.SOL_WRAPPED_MINT,
+    sol_authorized_relayer: config.SOL_AUTHORIZED_RELAYER,
     keypair_path: '[REDACTED]',
     retry_interval: config.RETRY_INTERVAL_MS,
     poll_interval: config.POLL_INTERVAL_MS,

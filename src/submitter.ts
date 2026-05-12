@@ -2,8 +2,6 @@ import {
   Connection,
   Keypair,
   PublicKey,
-  Transaction,
-  sendAndConfirmTransaction,
   SystemProgram,
   LAMPORTS_PER_SOL
 } from '@solana/web3.js';
@@ -11,19 +9,20 @@ import {
   Program,
   AnchorProvider,
   Wallet,
-  BN,
-  utils
+  BN
 } from '@coral-xyz/anchor';
 import {
   getAssociatedTokenAddress,
   TOKEN_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID
+  createAssociatedTokenAccountIdempotentInstruction
 } from '@solana/spl-token';
+import { ethers } from 'ethers';
 import * as fs from 'fs';
 import { Config, BridgeMessage } from './types';
 import { RelayerDB } from './db';
-import { classify, FailureKind, backoffMs } from './errors';
 import idl from '../idl/bridge.json';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const bs58 = require('bs58') as { encode: (buf: Buffer) => string; decode: (str: string) => Uint8Array };
 
 function log(context: any): void {
   console.log(JSON.stringify({
@@ -33,35 +32,23 @@ function log(context: any): void {
   }));
 }
 
-// Hard ceiling for waiting on a single tx to confirm. If the blockhash expires
-// or the RPC stalls past this, we abandon the wait and let the retry loop
-// re-submit with a fresh blockhash rather than blocking the submitter forever.
-const CONFIRM_TIMEOUT_MS = 60_000;
-
-// Minimum balance below which we stop attempting submissions entirely. Burning
-// retries while the relayer is empty just spams logs.
-const MIN_OPERATIONAL_SOL = 0.01;
-
-const MAX_RETRIES = 5;
-
 export class SolanaSubmitter {
   private connection: Connection;
   private relayerKeypair: Keypair;
   private program: Program;
-  private config: Config;
   private db: RelayerDB;
+  private config: Config;
   private programId: PublicKey;
   private wrappedMint: PublicKey;
+  private ethBridge: ethers.Contract | null;
 
-  // Circuit-breaker state. When set in the future, submit() short-circuits and
-  // marks the attempt as a transient failure without touching the RPC. This
-  // protects against thundering-herd retries when the relayer wallet is empty
-  // or the RPC is rate-limiting us.
-  private pausedUntil: number = 0;
+  private static readonly ETH_BRIDGE_ABI = [
+    'function markRelayed(uint64 nonce, bytes32 solanaTxHash) external'
+  ];
 
   constructor(config: Config, db: RelayerDB) {
-    this.config = config;
     this.db = db;
+    this.config = config;
 
     this.connection = new Connection(config.SOL_RPC_URL, 'confirmed');
     this.programId = new PublicKey(config.SOL_PROGRAM_ID);
@@ -81,6 +68,20 @@ export class SolanaSubmitter {
 
     this.program = new Program(idl as any, this.programId, provider);
 
+    // Ethereum signer is optional — only needed for the markRelayed callback
+    if (config.ETH_RELAYER_PRIVATE_KEY) {
+      const ethProvider = new ethers.JsonRpcProvider(config.ETH_RPC_URL);
+      const ethSigner = new ethers.Wallet(config.ETH_RELAYER_PRIVATE_KEY, ethProvider);
+      this.ethBridge = new ethers.Contract(
+        config.ETH_BRIDGE_ADDRESS,
+        SolanaSubmitter.ETH_BRIDGE_ABI,
+        ethSigner
+      );
+    } else {
+      this.ethBridge = null;
+      log({ event: 'eth_mark_relayed_disabled', level: 'warn', reason: 'ETH_RELAYER_PRIVATE_KEY not set' });
+    }
+
     log({
       event: 'solana_submitter_initialized',
       relayer_pubkey: this.relayerKeypair.publicKey.toBase58(),
@@ -91,138 +92,123 @@ export class SolanaSubmitter {
   }
 
   async submit(msg: BridgeMessage): Promise<void> {
-    // Circuit breaker: if we're paused (e.g. low balance), don't even try.
-    // We don't bump retryCount in this case — the message isn't failing on its
-    // own merits, the relayer is just temporarily incapable.
-    if (Date.now() < this.pausedUntil) {
-      log({
-        event: 'solana_submission_skipped_paused',
-        level: 'warn',
-        id: msg.id,
-        nonce: msg.nonce,
-        paused_until: new Date(this.pausedUntil).toISOString()
-      });
-      return;
-    }
-
-    // Validate the payload up front. A malformed recipient pubkey is permanent —
-    // retrying it 5 times accomplishes nothing. Do this BEFORE we flip status to
-    // 'submitted' so a poison message never enters the "in flight" state.
-    let recipientPubkey: PublicKey;
     try {
-      recipientPubkey = new PublicKey(msg.recipient);
-    } catch (e: any) {
-      this.db.markDead(msg.id, `invalid recipient: ${e.message}`);
       log({
-        event: 'solana_payload_invalid',
-        level: 'error',
+        event: 'solana_submission_start',
         id: msg.id,
         nonce: msg.nonce,
         recipient: msg.recipient,
-        error: e.message
+        amount: msg.amount
       });
-      return;
-    }
 
-    log({
-      event: 'solana_submission_start',
-      id: msg.id,
-      nonce: msg.nonce,
-      recipient: msg.recipient,
-      amount: msg.amount,
-      attempt: msg.retryCount + 1
-    });
+      // Update status to submitted
+      this.db.updateStatus(msg.id, 'submitted');
 
-    // Pre-flight balance check. If we're below the operational floor, pause the
-    // submitter for a minute rather than burning retries.
-    try {
+      // Check relayer balance
       const balance = await this.connection.getBalance(this.relayerKeypair.publicKey);
-      if (balance < MIN_OPERATIONAL_SOL * LAMPORTS_PER_SOL) {
-        this.pausedUntil = Date.now() + 60_000;
-        log({
-          event: 'solana_submitter_paused_low_balance',
-          level: 'error',
-          id: msg.id,
-          balance_sol: balance / LAMPORTS_PER_SOL,
-          min_required_sol: MIN_OPERATIONAL_SOL,
-          paused_for_ms: 60_000
-        });
-        return;
+      if (balance < 0.01 * LAMPORTS_PER_SOL) {
+        throw new Error(`Insufficient relayer balance: ${balance / LAMPORTS_PER_SOL} SOL`);
       }
-    } catch (e: any) {
-      // Balance check itself failed — treat as transient and let the retry loop
-      // handle it. Don't bump retryCount yet; we haven't actually attempted.
-      log({
-        event: 'solana_balance_check_failed',
-        level: 'warn',
-        id: msg.id,
-        error: e.message
-      });
-      return;
-    }
 
-    // Mark in-flight only after pre-flight passes. If we crash between here and
-    // a terminal status, recoverStuckSubmitted() on next boot will flip this
-    // back to 'pending'.
-    this.db.updateStatus(msg.id, 'submitted');
+      const SOURCE_CHAIN_ID = 1;
 
-    try {
+      // Decode byte buffers from message fields
+      const sourceBridgeBytes = Buffer.from(this.config.ETH_BRIDGE_ADDRESS.replace(/^0x/, ''), 'hex');
+      const sourceTokenBytes  = Buffer.from(this.config.ETH_TOKEN_ADDRESS.replace(/^0x/, ''), 'hex');
+      const senderBytes       = Buffer.from(msg.sender.replace(/^0x/, ''), 'hex');
+      const recipientSolBytes = Buffer.from(bs58.decode(msg.recipient));
+      const sourceTxHashBytes = Buffer.from(msg.sourceTxHash.replace(/^0x/, ''), 'hex');
+
+      if (sourceBridgeBytes.length !== 20) throw new Error('ETH_BRIDGE_ADDRESS must be 20 bytes');
+      if (sourceTokenBytes.length !== 20)  throw new Error('ETH_TOKEN_ADDRESS must be 20 bytes');
+      if (senderBytes.length !== 20)       throw new Error('sender must be 20 bytes');
+      if (recipientSolBytes.length !== 32) throw new Error('recipient (base58) must decode to 32 bytes');
+      if (sourceTxHashBytes.length !== 32) throw new Error('sourceTxHash must be 32 bytes');
+
+      // Ethereum bUSD = 18 decimals; Solana wrapped mint = 6 decimals.
+      // Rescale by 10^12 before fitting into the u64 payload.
+      const SCALE_DIVISOR = BigInt(10) ** BigInt(12);
+      const rawAmount = BigInt(msg.amount);
+      if (rawAmount % SCALE_DIVISOR !== BigInt(0)) {
+        log({ event: 'amount_truncated', level: 'warn', raw: msg.amount, scale_divisor: SCALE_DIVISOR.toString() });
+      }
+      const scaledAmount = rawAmount / SCALE_DIVISOR;
+      const amountBN = new BN(scaledAmount.toString());
+      if (amountBN.bitLength() > 64) throw new Error(`scaled amount ${scaledAmount} exceeds u64::MAX`);
+
+      // Build the fixed-width binary BridgePayload
+      const bridgePayload = {
+        version: 1,
+        sourceChainId: SOURCE_CHAIN_ID,
+        sourceBridge: Array.from(sourceBridgeBytes),
+        sourceToken:  Array.from(sourceTokenBytes),
+        nonce:  new BN(msg.nonce),
+        amount: amountBN,
+        senderEth:    Array.from(senderBytes),
+        recipientSol: Array.from(recipientSolBytes),
+        sourceTxHash: Array.from(sourceTxHashBytes),
+        sourceLogIndex: msg.logIndex ?? 0,
+      };
+
+      // Derive the ProcessedMessage PDA: ["processed", chainLE2, bridge20, nonceLE8]
+      const chainBuf = Buffer.alloc(2);
+      chainBuf.writeUInt16LE(SOURCE_CHAIN_ID, 0);
+      const nonceBuf = Buffer.alloc(8);
+      nonceBuf.writeBigUInt64LE(BigInt(msg.nonce), 0);
       const [processedMessagePda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("processed"), Buffer.from(msg.nonce)],
+        [Buffer.from('processed'), chainBuf, sourceBridgeBytes, nonceBuf],
         this.programId
       );
 
+      // Derive BridgeConfig and mintAuthority PDAs deterministically
+      const [configPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('config')],
+        this.programId
+      );
+      const [mintAuthorityPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('mint_authority')],
+        this.programId
+      );
+
+      const recipientPubkey = new PublicKey(msg.recipient);
       const recipientAta = await getAssociatedTokenAddress(
         this.wrappedMint,
         recipientPubkey
       );
 
-      const bridgePayload = {
-        nonce: new BN(msg.nonce),
-        sender: msg.sender,
-        recipient: msg.recipient,
-        token: msg.token,
-        amount: new BN(msg.amount),
-        sourceChain: msg.sourceChain,
-        targetChain: msg.targetChain,
-        sourceTxHash: msg.sourceTxHash
-      };
+      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        this.relayerKeypair.publicKey,
+        recipientAta,
+        recipientPubkey,
+        this.wrappedMint
+      );
 
       log({
         event: 'solana_accounts_derived',
         id: msg.id,
+        config_pda: configPda.toBase58(),
         processed_message_pda: processedMessagePda.toBase58(),
+        mint_authority_pda: mintAuthorityPda.toBase58(),
         recipient_ata: recipientAta.toBase58(),
         recipient: recipientPubkey.toBase58()
       });
 
-      const tx = await this.program.methods
+      const signature = await this.program.methods
         .mintWrapped(bridgePayload)
         .accounts({
           relayer: this.relayerKeypair.publicKey,
+          config: configPda,
           processedMessage: processedMessagePda,
           wrappedMint: this.wrappedMint,
+          mintAuthority: mintAuthorityPda,
           recipient: recipientPubkey,
           recipientTokenAccount: recipientAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId
+          systemProgram: SystemProgram.programId,
         })
-        .transaction();
-
-      const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash();
-      tx.recentBlockhash = blockhash;
-      tx.feePayer = this.relayerKeypair.publicKey;
-      tx.sign(this.relayerKeypair);
-
-      const signature = await this.connection.sendRawTransaction(
-        tx.serialize(),
-        {
-          skipPreflight: false,
-          preflightCommitment: 'confirmed',
-          maxRetries: 3
-        }
-      );
+        .preInstructions([createAtaIx])
+        .signers([this.relayerKeypair])
+        .rpc();
 
       log({
         event: 'solana_transaction_sent',
@@ -231,28 +217,22 @@ export class SolanaSubmitter {
         nonce: msg.nonce
       });
 
-      // Wrap confirmation in a timeout. confirmTransaction can hang past
-      // lastValidBlockHeight in some web3.js versions / RPC providers; we
-      // don't want that to pin a worker indefinitely.
-      const confirmation = await this.withTimeout(
-        this.connection.confirmTransaction({
-          signature,
-          blockhash,
-          lastValidBlockHeight
-        }),
-        CONFIRM_TIMEOUT_MS,
-        'confirmTransaction'
-      );
+      // Confirm transaction
+      const { lastValidBlockHeight } = await this.connection.getLatestBlockhash();
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      const confirmation = await this.connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight
+      });
 
       if (confirmation.value.err) {
-        // Construct an Error that carries the on-chain err so classify() can
-        // see "already processed" style program errors.
-        const e: any = new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-        e.logs = (confirmation.value as any)?.logs || [];
-        throw e;
+        throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
       }
 
+      // Update status to delivered
       this.db.updateStatus(msg.id, 'delivered');
+
       log({
         event: 'solana_delivered',
         id: msg.id,
@@ -262,108 +242,37 @@ export class SolanaSubmitter {
         amount: msg.amount
       });
 
+      await this.markRelayedOnEthereum(msg.nonce, signature);
+
     } catch (error: any) {
-      const c = classify(error);
-      const nextAttempt = msg.retryCount + 1;
+      // Update status to failed and increment retry count
+      this.db.updateStatus(msg.id, 'failed', msg.retryCount + 1);
 
-      switch (c.kind) {
-        case FailureKind.ALREADY_PROCESSED:
-          // The bridge state is consistent — somebody (us, on a prior run, or
-          // another relayer) already minted for this nonce. Don't retry; mark
-          // delivered so it stops showing up in the queue.
-          this.db.updateStatus(msg.id, 'delivered');
-          log({
-            event: 'solana_already_processed',
-            level: 'warn',
-            id: msg.id,
-            nonce: msg.nonce,
-            reason: c.reason
-          });
-          return;
+      log({
+        event: 'solana_failed',
+        level: 'error',
+        id: msg.id,
+        nonce: msg.nonce,
+        error: error.message,
+        retry_count: msg.retryCount + 1
+      });
 
-        case FailureKind.PERMANENT:
-          // Hopeless — program rejected the payload for a reason that won't
-          // change without operator action. Park it.
-          this.db.markDead(msg.id, c.reason);
-          log({
-            event: 'solana_failed_permanent',
-            level: 'error',
-            id: msg.id,
-            nonce: msg.nonce,
-            reason: c.reason,
-            error: error.message
-          });
-          return;
-
-        case FailureKind.INSUFFICIENT_FUNDS:
-          // Pause the submitter; don't bump retryCount (this isn't the
-          // message's fault). The retry loop will skip submissions while
-          // pausedUntil is in the future.
-          this.pausedUntil = Date.now() + 60_000;
-          log({
-            event: 'solana_submitter_paused_funds',
-            level: 'error',
-            id: msg.id,
-            nonce: msg.nonce,
-            error: error.message
-          });
-          return;
-
-        case FailureKind.TRANSIENT:
-        default:
-          this.db.updateStatus(msg.id, 'failed', nextAttempt);
-          log({
-            event: 'solana_failed',
-            level: 'error',
-            id: msg.id,
-            nonce: msg.nonce,
-            error: error.message,
-            retry_count: nextAttempt,
-            kind: c.kind
-          });
-          if (nextAttempt >= MAX_RETRIES) {
-            // Exhausted: move to 'dead' so the retry loop stops scanning it
-            // and operators have a clear queue of human-attention items.
-            this.db.markDead(msg.id, `retry budget exhausted after ${MAX_RETRIES} attempts: ${c.reason}`);
-            log({
-              event: 'retry_exhausted',
-              level: 'warn',
-              id: msg.id,
-              nonce: msg.nonce,
-              final_error: error.message
-            });
-          }
-          return;
+      // Check if retries exhausted
+      if (msg.retryCount + 1 >= 5) {
+        log({
+          event: 'retry_exhausted',
+          level: 'warn',
+          id: msg.id,
+          nonce: msg.nonce,
+          final_error: error.message
+        });
       }
     }
   }
 
-  // Race a promise against a timeout. Rejects with a descriptive error if the
-  // timeout wins so classify() routes it as transient.
-  private withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-      p.then(
-        (v) => { clearTimeout(t); resolve(v); },
-        (e) => { clearTimeout(t); reject(e); }
-      );
-    });
-  }
-
   async retryFailed(): Promise<void> {
     try {
-      // Honor circuit breaker. Logging is cheap; spamming retries while paused
-      // is not.
-      if (Date.now() < this.pausedUntil) {
-        log({
-          event: 'retry_skipped_paused',
-          level: 'debug',
-          paused_until: new Date(this.pausedUntil).toISOString()
-        });
-        return;
-      }
-
-      const undeliveredMessages = this.db.getUndelivered(60_000, MAX_RETRIES);
+      const undeliveredMessages = this.db.getUndelivered();
 
       if (undeliveredMessages.length === 0) {
         log({
@@ -378,24 +287,7 @@ export class SolanaSubmitter {
         count: undeliveredMessages.length
       });
 
-      let processed = 0;
       for (const message of undeliveredMessages) {
-        // Per-message backoff: only retry if enough time has passed since the
-        // last attempt, scaled by retryCount. A message that just failed 200ms
-        // ago shouldn't be tried again on the very next tick of the loop.
-        const waitNeeded = backoffMs(message.retryCount);
-        const sinceLast = Date.now() - message.updatedAt;
-        if (sinceLast < waitNeeded) {
-          log({
-            event: 'retry_deferred_backoff',
-            level: 'debug',
-            id: message.id,
-            retry_count: message.retryCount,
-            wait_remaining_ms: waitNeeded - sinceLast
-          });
-          continue;
-        }
-
         log({
           event: 'retry_attempted',
           id: message.id,
@@ -404,36 +296,15 @@ export class SolanaSubmitter {
           status: message.status
         });
 
-        // submit() handles all its own errors internally and never throws, so
-        // a single bad message can't abort the batch. But if that ever changes
-        // (or an unexpected error slips through), isolate it here.
-        try {
-          await this.submit(message);
-        } catch (e: any) {
-          log({
-            event: 'retry_submit_unexpected_error',
-            level: 'error',
-            id: message.id,
-            error: e.message
-          });
-        }
-        processed++;
+        await this.submit(message);
 
-        // If submit() paused us mid-batch (e.g. balance dropped), stop the
-        // batch — no point continuing.
-        if (Date.now() < this.pausedUntil) {
-          log({ event: 'retry_batch_aborted_paused', level: 'warn' });
-          break;
-        }
-
-        // Small inter-message delay to avoid hammering the RPC.
-        await this.sleep(250);
+        // Small delay between retries to avoid overwhelming the network
+        await this.sleep(1000);
       }
 
       log({
         event: 'retry_batch_completed',
-        scanned: undeliveredMessages.length,
-        processed
+        count: undeliveredMessages.length
       });
 
     } catch (error: any) {
@@ -475,6 +346,35 @@ export class SolanaSubmitter {
         error: error.message
       });
       return 0;
+    }
+  }
+
+  private async markRelayedOnEthereum(nonce: string, solanaSignature: string): Promise<void> {
+    if (!this.ethBridge) {
+      log({ event: 'eth_mark_relayed_skipped', level: 'warn', nonce, reason: 'no ETH signer configured' });
+      return;
+    }
+    try {
+      const solanaTxHash = ethers.keccak256(ethers.toUtf8Bytes(solanaSignature));
+      const tx = await this.ethBridge.markRelayed(BigInt(nonce), solanaTxHash);
+      const receipt = await tx.wait();
+
+      log({
+        event: 'ethereum_mark_relayed_success',
+        nonce,
+        eth_tx_hash: tx.hash,
+        eth_block_number: receipt?.blockNumber,
+        solana_signature: solanaSignature,
+        solana_signature_hash: solanaTxHash
+      });
+    } catch (error: any) {
+      log({
+        event: 'ethereum_mark_relayed_failed',
+        level: 'error',
+        nonce,
+        solana_signature: solanaSignature,
+        error: error.message
+      });
     }
   }
 
