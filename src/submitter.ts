@@ -125,8 +125,16 @@ export class SolanaSubmitter {
       if (recipientSolBytes.length !== 32) throw new Error('recipient (base58) must decode to 32 bytes');
       if (sourceTxHashBytes.length !== 32) throw new Error('sourceTxHash must be 32 bytes');
 
-      const amountBN = new BN(msg.amount);
-      if (amountBN.bitLength() > 64) throw new Error('amount exceeds u64::MAX');
+      // Ethereum bUSD = 18 decimals; Solana wrapped mint = 6 decimals.
+      // Rescale by 10^12 before fitting into the u64 payload.
+      const SCALE_DIVISOR = BigInt(10) ** BigInt(12);
+      const rawAmount = BigInt(msg.amount);
+      if (rawAmount % SCALE_DIVISOR !== BigInt(0)) {
+        log({ event: 'amount_truncated', level: 'warn', raw: msg.amount, scale_divisor: SCALE_DIVISOR.toString() });
+      }
+      const scaledAmount = rawAmount / SCALE_DIVISOR;
+      const amountBN = new BN(scaledAmount.toString());
+      if (amountBN.bitLength() > 64) throw new Error(`scaled amount ${scaledAmount} exceeds u64::MAX`);
 
       // Build the fixed-width binary BridgePayload
       const bridgePayload = {
